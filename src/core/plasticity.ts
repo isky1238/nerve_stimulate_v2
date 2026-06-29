@@ -108,6 +108,24 @@ export function applySupervisedMotorLearning(
       : -config.supervisedLearningRate * (wasWronglyActive ? 1 : 0.7) * plasticityGate;
 
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
+
+    if (wasWronglyActive && synapse.state === "stable" && synapse.eligibilityTrace > 0) {
+      const stableBefore = synapse.stableWeight;
+      const stableDelta = -config.depotentiationRate * synapse.eligibilityTrace * plasticityGate;
+      synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
+      if (synapse.stableWeight < config.stableThreshold) {
+        synapse.state = "active";
+      }
+      if (synapse.stableWeight !== stableBefore) {
+        events.push({
+          synapseId: synapse.id,
+          kind: "supervised",
+          deltaFast: 0,
+          deltaStable: synapse.stableWeight - stableBefore
+        });
+      }
+    }
+
     synapse.recentContribution = ema(
       synapse.recentContribution,
       isTarget ? Math.abs(synapse.effectiveWeight) : -Math.abs(synapse.effectiveWeight),

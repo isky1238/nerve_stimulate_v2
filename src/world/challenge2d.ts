@@ -165,7 +165,8 @@ export function createChallengeConfig(config: ModelConfig): ModelConfig {
     refractorySteps: 0,
     fastDecay: 0.9995,
     stableThreshold: 0.12,
-    useThreshold: 0.08
+    useThreshold: 0.08,
+    depotentiationRate: 0.64
   });
 }
 
