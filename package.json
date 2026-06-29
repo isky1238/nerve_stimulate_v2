@@ -1,0 +1,26 @@
+{
+  "name": "dg-snn-v2-model",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dual-gated spiking neural network offline model prototype.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/tests/evaluation.test.js",
+    "eval": "npm run build && node dist/src/cli.js eval",
+    "export": "npm run build && node dist/src/cli.js export",
+    "export:2d-challenge": "npm run build && node dist/src/cli.js export:2d-challenge",
+    "trace": "npm run build && node dist/src/cli.js trace",
+    "explain": "npm run build && node dist/src/cli.js explain",
+    "audit": "npm run build && node dist/src/cli.js audit",
+    "audit:2d": "npm run build && node dist/src/cli.js audit:2d",
+    "audit:2d-challenge": "npm run build && node dist/src/cli.js audit:2d-challenge",
+    "audit:transfer": "npm run build && node dist/src/cli.js audit:transfer",
+    "audit:transfer:cell": "npm run build && node dist/src/cli.js audit:transfer:cell",
+    "audit:transfer:matrix": "npm run build && node dist/src/cli.js audit:transfer:matrix",
+    "audit:transfer:matrix:multi": "npm run build && node dist/src/cli.js audit:transfer:matrix:multi"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.7",
+    "typescript": "^5.8.3"
+  }
+}

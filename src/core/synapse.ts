@@ -1,0 +1,147 @@
+import { ModelConfig } from "../config/newModelConfig";
+import { Branch, Neuron } from "./neuron";
+import { Signal, clampMagnitude, ema, isActiveSignal } from "./signal";
+
+export type SynapseState = "candidate" | "active" | "dormant" | "pruned" | "stable";
+export type EffectSign = 1 | -1;
+
+export interface Synapse {
+  id: string;
+  preNeuronId: string;
+  postNeuronId: string;
+  postBranchId: string;
+
+  effectSign: EffectSign;
+  connected: boolean;
+  state: SynapseState;
+
+  fastWeight: number;
+  stableWeight: number;
+  effectiveWeight: number;
+
+  age: number;
+  dormantTicks: number;
+  lastUsedTime: number;
+  recentUse: number;
+  recentContribution: number;
+
+  preTrace: number;
+  postTrace: number;
+  eligibilityTrace: number;
+
+  reconnectCooldown: number;
+  pruneMark: number;
+  stabilityScore: number;
+}
+
+export interface CreateSynapseParams {
+  id: string;
+  preNeuronId: string;
+  postNeuronId: string;
+  postBranchId: string;
+  effectSign?: EffectSign;
+  state?: SynapseState;
+  fastWeight?: number;
+  stableWeight?: number;
+}
+
+export interface PropagationEvent {
+  synapseId: string;
+  preSignal: Signal;
+  effect: number;
+}
+
+export function createSynapse(params: CreateSynapseParams, config: ModelConfig): Synapse {
+  const synapse: Synapse = {
+    id: params.id,
+    preNeuronId: params.preNeuronId,
+    postNeuronId: params.postNeuronId,
+    postBranchId: params.postBranchId,
+    effectSign: params.effectSign ?? 1,
+    connected: true,
+    state: params.state ?? "active",
+    fastWeight: params.fastWeight ?? config.fastWeightInit,
+    stableWeight: params.stableWeight ?? config.stableWeightInit,
+    effectiveWeight: 0,
+    age: 0,
+    dormantTicks: 0,
+    lastUsedTime: -1,
+    recentUse: 0,
+    recentContribution: 0,
+    preTrace: 0,
+    postTrace: 0,
+    eligibilityTrace: 0,
+    reconnectCooldown: 0,
+    pruneMark: 0,
+    stabilityScore: 0
+  };
+
+  refreshSynapseWeight(synapse, config);
+  return synapse;
+}
+
+export function refreshSynapseWeight(synapse: Synapse, config: ModelConfig): void {
+  const magnitude = clampMagnitude(synapse.fastWeight + synapse.stableWeight, 0, config.maxWeight);
+  synapse.effectiveWeight = synapse.effectSign * magnitude;
+}
+
+export function refreshSynapseWeights(synapses: Synapse[], config: ModelConfig): void {
+  for (const synapse of synapses) {
+    refreshSynapseWeight(synapse, config);
+  }
+}
+
+export function isConductingSynapse(synapse: Synapse): boolean {
+  return synapse.connected && synapse.state !== "pruned" && synapse.state !== "dormant";
+}
+
+export function propagateSynapses(
+  neuronsById: Map<string, Neuron>,
+  synapses: Synapse[],
+  tick: number,
+  config: ModelConfig
+): PropagationEvent[] {
+  const events: PropagationEvent[] = [];
+
+  for (const synapse of synapses) {
+    synapse.age += 1;
+    refreshSynapseWeight(synapse, config);
+
+    if (!isConductingSynapse(synapse)) {
+      continue;
+    }
+
+    const pre = neuronsById.get(synapse.preNeuronId);
+    const post = neuronsById.get(synapse.postNeuronId);
+    const postBranch = post?.branches.find((branch) => branch.id === synapse.postBranchId);
+
+    if (!pre || !post || !postBranch) {
+      continue;
+    }
+
+    if (!isActiveSignal(pre.outputSignal)) {
+      synapse.recentUse = ema(synapse.recentUse, 0, config.emaAlpha);
+      continue;
+    }
+
+    const effect = pre.outputSignal * synapse.effectiveWeight;
+    applyEffectToBranch(postBranch, effect);
+    synapse.lastUsedTime = tick;
+    synapse.recentUse = ema(synapse.recentUse, 1, config.emaAlpha);
+    events.push({
+      synapseId: synapse.id,
+      preSignal: pre.outputSignal,
+      effect
+    });
+  }
+
+  return events;
+}
+
+function applyEffectToBranch(branch: Branch, effect: number): void {
+  branch.inputSum += effect;
+
+  if (effect < 0) {
+    branch.inhibitionLoad += Math.abs(effect);
+  }
+}

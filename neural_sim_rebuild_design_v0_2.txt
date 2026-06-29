@@ -1,0 +1,1058 @@
+神经模拟项目重构设计草案 v0.2
+文件用途：作为重构前的算法设计说明，不是最终实现规范。
+设计目标：从“调参式随机网络”重构为“可解释的神经元-分支-突触-连接形成-评测”基础模型。
+
+
+============================================================
+0. 当前判断
+============================================================
+
+你的新想法是合理的，而且方向比继续在旧模型上堆参数更健康。
+
+旧模型的问题不是“没有机制”，而是机制已经很多：
+- LIF 神经元
+- 兴奋/抑制神经元
+- reward-modulated STDP
+- reward baseline / RPE
+- spike-rate homeostasis
+- modulator
+- stable/labile 双层权重
+- contribution / influence trace
+- scaffold 拓扑
+- episode 日志
+
+但它的问题是：
+1. 机制过早耦合，难以判断是哪一层出了问题。
+2. 学习链条缺少可单独验证的中间指标。
+3. 网络一开始就进入二维环境，行为结果会混合感知、运动、学习、奖励、随机游走等多种因素。
+4. 当前实现中存在“结构上有学习系统，但学习率可能关闭或接近关闭”的风险。
+5. 随机突触 + STDP + reward + homeostasis 同时存在，容易形成不可解释的黑箱。
+
+所以重构应该从“更像生物”转向“更可控地模拟几个关键生物原则”：
+- 神经元有阈值；
+- 树突输入不是直接等于轴突输出；
+- 抑制是门控，不只是负权重；
+- 连接形成要有发育规则；
+- 学习要有短期/长期两层；
+- 评测先脱离环境，后进入环境。
+
+
+============================================================
+1. 重构总原则
+============================================================
+
+原则 1：先建静态可解释电路，再加入学习。
+不要一开始就让连接、权重、阈值、刺激、奖励、运动同时变化。
+
+推荐顺序：
+Phase 0：固定连接 + 固定权重，验证信号传播。
+Phase 1：固定连接 + 可变权重，验证学习。
+Phase 2：可形成连接 + 可断开连接，验证结构稳定。
+Phase 3：加入二维环境，验证行为。
+Phase 4：加入神经调质、去抑制、长期固化。
+
+原则 2：把“信号传播”和“学习更新”拆开。
+神经元本步是否放电，是动力学问题；
+突触以后是否变强，是学习问题。
+二者不要混在一个 weight += reward 的简单公式里。
+
+原则 3：把“连接形成”和“连接权重改变”拆开。
+连接是否存在，是结构问题；
+连接强弱是多少，是权重问题。
+不要让低权重等同于断开，应该有单独的 connected / dormant / pruned 状态。
+
+原则 4：把“抑制”从负权重升级为门控变量。
+- 负权重只能表示减少膜电位；
+- 生物抑制还包括分流、阈值抬高、学习窗口关闭、树突分支冻结。
+所以抑制应至少有两种效果：
+1. 降低输入有效性；
+2. 关闭或降低可塑性。
+
+
+============================================================
+2. 核心对象重构
+============================================================
+
+建议从 6 个核心对象开始：
+
+1. Neuron 神经元
+2. Compartment 神经元区室
+3. Synapse 突触
+4. Gate 门控
+5. Signal 信号
+6. DevelopmentRule 连接形成规则
+
+
+============================================================
+3. Neuron 神经元设计
+============================================================
+
+你的“重塑神经元”思路可以这样规范化：
+
+一个神经元由三层组成：
+1. dendrite/input layer：树突输入层；
+2. soma/AIS decision layer：胞体/轴突初段判定层；
+3. axon/output layer：轴突输出层。
+
+注意：
+这里不需要一开始模拟真实树突形态。
+可以先用“若干树突分支 branch”来抽象。
+
+数据结构建议：
+
+Neuron:
+    id: string
+    role: sensory | interneuron | motor
+    subtype: excitatory | inhibitory | modulatory
+    position: { x, y }
+
+    branches: Branch[]
+    somaV: number
+    axonV: number
+
+    dendriteToAxonGate: Gate
+    axonOutputGate: Gate
+
+    threshold: number
+    dynamicThreshold: number
+    refractory: number
+    lastSpikeTime: number
+
+    maxInputSlots: number
+    maxOutputSlots: number
+
+    outputSignal: -1 | 0 | 1
+    spike: boolean
+
+    health:
+        recentSpikeRate: number
+        dormantTime: number
+        overactiveTime: number
+
+
+============================================================
+4. 两个门控的定义
+============================================================
+
+你提出两个门控，这是重构里最有价值的部分。
+
+------------------------------------------------------------
+4.1 第一门控：树突-轴突阈值阀门
+------------------------------------------------------------
+
+建议命名：
+dendriteToAxonGate
+
+它不是单纯的阈值，而是“输入整合能否进入放电判定层”。
+
+作用：
+- 决定树突输入是否能有效影响 soma/AIS；
+- 模拟树突抑制、局部分支冻结、输入门控；
+- 防止所有突触输入直接推高放电概率。
+
+计算形式：
+
+branchInput = Σ(synapseSignal * synapseWeight)
+branchInputAfterInhibition = branchInput * branch.gain
+
+if branchInputAfterInhibition >= branch.localThreshold:
+    branch.active = true
+else:
+    branch.active = false
+
+somaInput = Σ(activeBranch.output)
+
+dendriteToAxonGate.openRatio =
+    sigmoid((somaInput - dendriteGateThreshold) * gateSharpness)
+
+解释：
+- openRatio 接近 0：树突输入被冻结；
+- openRatio 接近 1：树突输入放行；
+- 中间值：部分放行。
+
+第一版也可以不用 sigmoid，直接用硬阈值：
+
+if somaInput >= dendriteGateThreshold:
+    gateOpen = true
+else:
+    gateOpen = false
+
+但是推荐保留 openRatio，因为之后可以做连续调节。
+
+
+------------------------------------------------------------
+4.2 第二门控：轴突统一信号阀门
+------------------------------------------------------------
+
+建议命名：
+axonOutputGate
+
+它决定神经元是否真正输出 spike/signal。
+
+作用：
+- 模拟 AIS(axon initial segment，轴突初段) 的动作电位触发；
+- 把内部激活状态转换为对外统一输出；
+- 避免输入层细节直接污染输出层。
+
+计算形式：
+
+axonDrive =
+    somaInput * dendriteToAxonGate.openRatio
+    + tonicExcitability
+    - inhibitionLoad
+    + noise
+
+if refractory > 0:
+    outputSignal = 0
+else if axonDrive >= dynamicThreshold:
+    spike = true
+    outputSignal = neuronOutputSign
+else:
+    spike = false
+    outputSignal = 0
+
+其中：
+neuronOutputSign:
+    excitatory neuron => +1
+    inhibitory neuron => -1
+    sensory neuron => 由刺激决定，可为 +1 / -1 / 0
+    motor neuron => 输出到行为，不一定再分 +1 / -1
+
+
+============================================================
+5. 信号设计：三档信号 1 / 0 / -1
+============================================================
+
+你的三档信号设计可以接受，适合作为 V0。
+
+Signal:
+    +1 = excitatory / positive activation
+     0 = no spike / no active signal
+    -1 = inhibitory / negative activation
+
+但要注意一个坑：
+在真实神经系统中，“-1”通常不是一个沿轴突传播的负动作电位。
+动作电位本身是正向事件；抑制性来自“这个神经元释放 GABA/glycine，突触后产生抑制效果”。
+
+所以更准确的抽象是：
+
+axonSignal:
+    0 or 1        # 是否放电
+
+synapseEffect:
+    +1 or -1      # 这个突触对下游是兴奋还是抑制
+
+也就是说，推荐内部实现不要让神经元直接输出 -1，而是：
+
+Neuron.spike = true/false
+Neuron.transmitterSign = +1/-1/modulatory
+Synapse.effectSign = preNeuron.transmitterSign
+
+但如果你想 V0 更简单，可以先保留：
+outputSignal ∈ {-1,0,+1}
+
+只是需要写清楚：
+-1 表示“抑制性神经元放电后对目标产生抑制效果”，不是负动作电位。
+
+
+============================================================
+6. 突触设计
+============================================================
+
+突触不要只存一个 weight。
+建议从一开始就加上短期权重、长期权重、状态标记。
+
+Synapse:
+    id: string
+    preNeuronId: string
+    postNeuronId: string
+    postBranchId: string
+
+    effectSign: +1 | -1
+    connected: boolean
+    state: candidate | active | dormant | pruned | stable
+
+    fastWeight: number       # 快速可变权重
+    stableWeight: number     # 长期固化权重
+    effectiveWeight: number  # effectSign * (fastWeight + stableWeight)
+
+    age: number
+    lastUsedTime: number
+    recentUse: number
+    recentContribution: number
+
+    preTrace: number
+    postTrace: number
+    eligibilityTrace: number
+
+    reconnectCooldown: number
+    pruneMark: number
+    stabilityScore: number
+
+解释：
+fastWeight：
+    对应短期学习，可快速增强/削弱，也容易遗忘。
+
+stableWeight：
+    对应长期稳定记忆，变化慢，不轻易被噪声破坏。
+
+effectiveWeight：
+    用于实际传播。
+
+state：
+    candidate：候选连接，刚形成，弱连接；
+    active：正在使用的连接；
+    dormant：暂时沉默，不立即删除；
+    pruned：已剪除；
+    stable：长期保留连接。
+
+
+============================================================
+7. 双权重机制
+============================================================
+
+你提出“双加权重”，这个方向正确。
+建议明确为：
+
+总权重 = 快速权重 + 稳定权重
+
+effectiveWeight = sign * clamp(fastWeight + stableWeight, 0, maxWeight)
+
+fastWeight 更新：
+- 快速；
+- 受 STDP / reward / 局部门控影响；
+- 可衰减；
+- 容易被噪声污染。
+
+stableWeight 更新：
+- 慢速；
+- 只有当某个连接长期有效、方向一致、行为结果稳定时才捕获；
+- 防止短期偶然事件写入长期结构。
+
+固化规则：
+
+if synapse.recentUse > useThreshold
+   and synapse.recentContribution > contributionThreshold
+   and rewardTrendStable
+   and postNeuronHealthOK:
+       stableWeight += captureRate * fastWeight
+       fastWeight *= (1 - captureRate)
+       synapse.state = stable
+
+反固化规则：
+
+if synapse.state == stable
+   and synapse.recentContribution < negativeThreshold
+   for longTime:
+       stableWeight *= stableDecay
+       synapse.state = active or dormant
+
+注意：
+不要让 stableWeight 永久不可动。
+否则早期错误连接会被锁死。
+
+
+============================================================
+8. 连接形成机制
+============================================================
+
+你提出“就近连接机制 + 阈值断开机制 + 标记防止短期重连接”，这个很合理。
+建议拆成四个机制：
+
+1. initial_growth 初始生长
+2. connection_candidate 候选连接
+3. activity_selection 活动筛选
+4. pruning_and_cooldown 剪枝与冷却
+
+
+------------------------------------------------------------
+8.1 就近连接
+------------------------------------------------------------
+
+连接概率：
+
+distance = dist(pre.position, post.position)
+
+pConnect =
+    baseProb
+    * exp(-distance / distanceLambda)
+    * roleCompatibility(pre.role, post.role)
+    * subtypeCompatibility(pre.subtype, post.subtype)
+    * branchAvailability(postBranch)
+
+规则：
+- 感觉神经元优先连中间神经元；
+- 中间神经元优先连中间神经元或输出神经元；
+- 输出神经元不回连感觉神经元，除非专门设计反馈环；
+- 抑制性中间神经元可以抑制中间神经元、输出神经元，后期再加“抑制抑制者”。
+
+第一版建议限制：
+sensory -> interneuron
+interneuron -> interneuron
+interneuron -> motor
+inhibitory interneuron -> interneuron/motor
+motor -> environment only
+
+不要一开始开放任意回路。
+
+
+------------------------------------------------------------
+8.2 连接候选状态
+------------------------------------------------------------
+
+新连接不要立刻成为强连接。
+先进入 candidate。
+
+candidate 连接：
+- 初始权重很小；
+- 有试用期；
+- 只有在多次参与有效输出后才转 active；
+- 试用失败进入 dormant 或 pruned。
+
+candidate -> active:
+
+if recentUse > minUse
+   and eligibilityTrace has consistent sign
+   and postNeuron not overactive:
+       state = active
+
+candidate -> pruned:
+
+if age > candidateMaxAge
+   and recentUse < minUse:
+       state = pruned
+       reconnectCooldown = cooldownTime
+
+
+------------------------------------------------------------
+8.3 阈值断开
+------------------------------------------------------------
+
+断开不应只看 weight 小。
+因为有些连接可能在当前环境暂时不用，但未来有用。
+
+推荐断开条件：
+
+if state != stable
+   and age > minAge
+   and recentUse < useMin
+   and abs(fastWeight) < weakThreshold
+   and recentContribution <= 0:
+       state = dormant
+
+if dormantTime > dormantLimit:
+       state = pruned
+
+解释：
+active -> dormant -> pruned
+比 active -> pruned 更稳定。
+
+
+------------------------------------------------------------
+8.4 防止短期重连接：标记机制
+------------------------------------------------------------
+
+你提出“标记”是对的。
+建议使用 reconnectCooldown + pairBanMark。
+
+PairMemory:
+    preNeuronId
+    postNeuronId
+    postBranchId
+    lastPrunedTime
+    failureCount
+    cooldownUntil
+
+如果某对连接刚被剪掉：
+- 一段时间内不能重新连接；
+- 失败次数越多，冷却越长；
+- 但不要永久禁止，因为环境可能变化。
+
+cooldown 公式：
+
+cooldown = baseCooldown * (1 + failureCount)^2
+
+这可以避免：
+剪掉 -> 马上重连 -> 再剪掉 -> 抖动。
+
+
+============================================================
+9. 抑制机制
+============================================================
+
+V0 可以用 -1 信号表示抑制，但设计上建议把抑制拆成三种效果：
+
+1. subtractive inhibition 减法抑制
+    targetInput -= inhibitoryWeight
+
+2. divisive/shunting inhibition 分流抑制
+    targetGain *= 1 / (1 + inhibitionLoad)
+
+3. plasticity inhibition 可塑性抑制
+    branchPlasticityGate *= lowValue
+
+建议 Branch 里加入：
+
+Branch:
+    id: string
+    inputSum: number
+    inhibitionLoad: number
+    gain: number
+    localThreshold: number
+    active: boolean
+    plasticityGate: number
+
+计算：
+
+branch.gain = 1 / (1 + inhibitionLoad * shuntScale)
+
+branchOutput =
+    max(0, excitatoryInput - subtractiveInhibition)
+    * branch.gain
+
+if inhibitionLoad > inhibitionFreezeThreshold:
+    branch.plasticityGate = 0
+else:
+    branch.plasticityGate = 1
+
+意义：
+抑制不只是“不让放电”，还可以“不让学习”。
+
+
+============================================================
+10. 解冻机制
+============================================================
+
+后期可以加入 disinhibition 去抑制。
+
+V0 不要复杂化，先只做：
+- 当正向反馈持续出现时，降低相关分支 inhibitionLoad；
+- 当负向反馈持续出现时，增强相关分支 inhibitionLoad；
+- 当分支长期沉默时，适度降低抑制，防止永久冻结。
+
+公式示例：
+
+if branch.recentPositiveContribution > threshold:
+    branch.inhibitionBias -= unlockRate
+
+if branch.recentNegativeContribution > threshold:
+    branch.inhibitionBias += suppressRate
+
+if branch.dormantTime > dormantLimit:
+    branch.inhibitionBias -= recoveryRate
+
+注意：
+解冻不是全局学习率提高，而是局部分支门控打开。
+
+
+============================================================
+11. 感觉神经元、中间神经元、输出神经元
+============================================================
+
+你提出三类神经元，建议这样定义：
+
+
+------------------------------------------------------------
+11.1 SensoryNeuron 感觉神经元
+------------------------------------------------------------
+
+职责：
+- 接收外部刺激；
+- 编码成神经信号；
+- 不参与复杂学习或少量参与适应。
+
+输入来源：
+- food/nutrient
+- toxin/negative nutrient
+- collision
+- speed
+- internal energy
+- novelty
+
+输出：
+- spike signal to interneuron
+
+建议不要让感觉神经元直接输出运动命令。
+否则行为会变成硬编码反射，不是学习。
+
+
+------------------------------------------------------------
+11.2 Interneuron 中间神经元
+------------------------------------------------------------
+
+职责：
+- 整合感觉输入；
+- 形成局部竞争；
+- 产生兴奋/抑制；
+- 承担主要学习。
+
+类型：
+- excitatory interneuron
+- inhibitory interneuron
+- disinhibitory interneuron（后期加入）
+
+V0 可先只有：
+- excitatory interneuron
+- inhibitory interneuron
+
+
+------------------------------------------------------------
+11.3 MotorNeuron 输出神经元
+------------------------------------------------------------
+
+职责：
+- 把神经活动解码为行为；
+- 不应该直接读取食物/毒物；
+- 可以有左右输出、前进输出、停止输出。
+
+输出设计：
+leftMotorActivity
+rightMotorActivity
+forwardMotorActivity
+stopMotorActivity
+
+第一版可以只用：
+leftMotor
+rightMotor
+
+行为解码：
+turn = rightMotor - leftMotor
+speed = baseSpeed + forwardGain * (leftMotor + rightMotor)
+
+
+============================================================
+12. 刺激信号规范
+============================================================
+
+刺激不要只分 food/toxin。
+建议把刺激拆成两层：
+
+Stimulus:
+    kind: nutrient | toxin | neutral
+    position: {x, y}
+    intensity: number
+    radius: number
+    valence: +1 | -1 | 0
+
+SensorReading:
+    channel: string
+    side: left | right | center
+    value: number
+    valence: +1 | -1 | 0
+
+感觉编码：
+
+foodLeft  -> positive sensory channel
+foodRight -> positive sensory channel
+toxinLeft -> negative sensory channel
+toxinRight-> negative sensory channel
+
+注意：
+负向刺激不一定要直接产生 -1 神经信号。
+更推荐：
+toxin 激活一组“危险感觉神经元”，这些神经元本身输出 spike，但它们的 valence 是 negative。
+负向意义交给 learning/reward 系统处理。
+
+也就是说：
+刺激 valence = -1
+不等于
+神经信号 = -1
+
+这点很重要。
+
+
+============================================================
+13. 权重表达与导出观察
+============================================================
+
+你要求“权重可以导出，可以观察”，这必须从数据结构一开始支持。
+
+每个 episode 导出：
+
+NetworkExport:
+    version
+    seed
+    config
+    neurons[]
+    branches[]
+    synapses[]
+    pairMemory[]
+    metrics[]
+    events[]
+
+Neuron 导出字段：
+    id
+    role
+    subtype
+    threshold
+    dynamicThreshold
+    recentSpikeRate
+    dormantTime
+    position
+
+Branch 导出字段：
+    neuronId
+    branchId
+    inputSum
+    inhibitionLoad
+    gain
+    plasticityGate
+    activeRate
+
+Synapse 导出字段：
+    id
+    pre
+    post
+    postBranch
+    state
+    effectSign
+    fastWeight
+    stableWeight
+    effectiveWeight
+    recentUse
+    recentContribution
+    eligibilityTrace
+    reconnectCooldown
+    stabilityScore
+
+关键观察指标：
+- activeSynapseRatio
+- candidateToActiveRate
+- pruneRate
+- reconnectRate
+- meanFastWeight
+- meanStableWeight
+- stableWeightRatio
+- inhibitionLoadMean
+- branchFrozenRatio
+- sensoryToInterSignalPenetration
+- interToMotorSignalPenetration
+- motorBalance
+- foodToxinRatio
+
+
+============================================================
+14. 评测标准：不要一上来放进环境
+============================================================
+
+这是你提出的关键点，非常正确。
+
+推荐 5 级评测。
+
+
+------------------------------------------------------------
+14.1 Test A：单神经元阈值测试
+------------------------------------------------------------
+
+目标：
+验证神经元阀门是否正确。
+
+输入：
+固定输入序列：
+0, 0.2, 0.4, 0.8, 1.2
+
+观察：
+- dendriteToAxonGate 是否随输入打开；
+- axonOutputGate 是否只在超过阈值后输出；
+- refractory 是否生效；
+- dynamicThreshold 是否在高频放电后上升。
+
+通过标准：
+- 弱输入不放电；
+- 强输入放电；
+- 高频刺激后放电率下降；
+- 停止刺激后恢复。
+
+
+------------------------------------------------------------
+14.2 Test B：单突触传播测试
+------------------------------------------------------------
+
+目标：
+验证兴奋/抑制传播。
+
+结构：
+Neuron A -> Neuron B
+
+测试：
+A excitatory:
+    A spike -> B input 增加
+
+A inhibitory:
+    A spike -> B inhibitionLoad 增加
+    B 对其他兴奋输入响应下降
+
+通过标准：
+- 兴奋连接增加 B 放电概率；
+- 抑制连接降低 B 放电概率；
+- 抑制不会错误改变所有神经元。
+
+
+------------------------------------------------------------
+14.3 Test C：小电路门控测试
+------------------------------------------------------------
+
+结构：
+Sensory S -> Interneuron E -> Motor M
+Inhibitory I -> E.branch
+
+测试：
+1. 无 I：S 激活可以传到 M。
+2. 有 I：S 激活被压制。
+3. 解冻：降低 I 后，S 再次传到 M。
+
+通过标准：
+- 门控影响局部分支，而不是全局网络；
+- 被抑制分支活动下降；
+- 解冻后信号恢复。
+
+
+------------------------------------------------------------
+14.4 Test D：连接形成测试
+------------------------------------------------------------
+
+目标：
+验证就近连接、候选连接、剪枝、冷却机制。
+
+环境：
+不放二维行为，只放固定节点坐标和输入模式。
+
+观察：
+- 近距离连接概率是否更高；
+- 无效连接是否进入 dormant/pruned；
+- 被剪掉连接是否不会马上重连；
+- 有效连接是否从 candidate 变 active/stable。
+
+通过标准：
+- 网络不会全连接；
+- 网络不会全部断开；
+- reconnect 抖动受控；
+- stable 连接比例缓慢上升。
+
+
+------------------------------------------------------------
+14.5 Test E：离线学习任务
+------------------------------------------------------------
+
+不要马上放食物/毒物环境。
+先做一个固定输入-输出映射：
+
+输入模式 A -> 期望 leftMotor
+输入模式 B -> 期望 rightMotor
+
+奖励：
+输出正确 +1
+输出错误 -1
+
+通过标准：
+learningOn 的正确率高于 learningOff。
+稳定连接中，相关路径权重上升。
+错误路径权重下降或被剪枝。
+
+这是进入二维环境前最关键的一关。
+
+
+============================================================
+15. 进入二维环境前的最低验收条件
+============================================================
+
+只有满足以下条件，才进入实际环境：
+
+1. 单神经元阈值测试通过。
+2. 兴奋/抑制传播测试通过。
+3. 局部门控/解冻测试通过。
+4. 连接形成不会崩成全连接或全断连。
+5. 离线输入-输出任务中 learningOn > learningOff。
+6. 导出日志能解释一次权重变化来自哪个输入、哪个输出、哪个反馈。
+7. stableWeight 增长慢于 fastWeight，且不会锁死错误连接。
+
+
+============================================================
+16. 推荐最小实现版本
+============================================================
+
+V0.1 不建议包含：
+- 复杂神经调质；
+- 真实钙离子；
+- 多种树突尖峰；
+- 真实线虫 connectome；
+- 过多神经元；
+- 自动大规模重连；
+- 复杂二维环境任务。
+
+V0.1 建议包含：
+- 12 个感觉神经元；
+- 12 个兴奋中间神经元；
+- 4 个抑制中间神经元；
+- 4 个输出神经元；
+- 每个神经元 2~4 个 branch；
+- 每个神经元固定最大输入/输出槽位；
+- 三值信号；
+- 两个门控；
+- fast/stable 双权重；
+- candidate/active/dormant/pruned/stable 状态；
+- reconnectCooldown；
+- 离线评测任务；
+- JSON/TXT 导出。
+
+
+============================================================
+17. 关键风险与避坑
+============================================================
+
+风险 1：把 -1 信号当作真实负动作电位。
+解决：
+文档中明确 -1 是“抑制性效果”，不是动作电位本身为负。
+
+风险 2：连接形成太自由，网络马上随机化。
+解决：
+先限制 role flow：
+sensory -> interneuron -> motor
+inhibitory interneuron -> interneuron/motor
+
+风险 3：短期奖励造成错误长期固化。
+解决：
+stableWeight 必须要求长期一致贡献，不允许单次 reward 捕获。
+
+风险 4：一上来进入环境导致评测混乱。
+解决：
+先做离线输入-输出任务。
+
+风险 5：抑制只做负权重，无法解释冻结/解冻。
+解决：
+抑制至少影响 branch.gain 和 branch.plasticityGate。
+
+风险 6：重连抖动。
+解决：
+pruned pair 必须进入 cooldown，并记录 failureCount。
+
+风险 7：阈值自适应把学习抵消掉。
+解决：
+homeostasis 更新速度必须慢于 spike dynamics 和 fastWeight 更新。
+
+
+============================================================
+18. 重构后的核心循环
+============================================================
+
+每个 tick：
+
+1. 读取外部刺激
+2. 感觉神经元编码
+3. 突触传播 signal
+4. 分支整合 excitatoryInput / inhibitionLoad
+5. 第一门控 dendriteToAxonGate 判定输入是否放行
+6. 第二门控 axonOutputGate 判定是否输出 spike
+7. 输出神经元解码行为
+8. 环境返回 reward / punishment
+9. 更新 eligibilityTrace
+10. 根据 reward + eligibility + branchPlasticityGate 更新 fastWeight
+11. 根据长期贡献更新 stableWeight
+12. 根据 use/contribution 更新连接状态
+13. 执行 dormant/pruned/cooldown 逻辑
+14. 更新统计指标并导出日志
+
+
+============================================================
+19. 一句话评价
+============================================================
+
+这次重构应该从“随机 LIF 网络 + 奖励调参”转为：
+
+具有局部门控的结构化神经网络：
+    固定角色层级
+    有限输入输出槽位
+    三值信号
+    双阈值门控
+    抑制性分支冻结
+    候选连接形成
+    冷却剪枝
+    fast/stable 双权重
+    先离线评测，后环境验证
+
+这个方向比继续在旧项目上叠 STDP、RPE、homeostasis 更适合突破当前瓶颈。
+因为它把“能不能传播”“能不能抑制”“能不能学习”“能不能稳定”拆成了可独立验证的子问题。
+
+
+============================================================
+20. 建议的下一步实现文件划分
+============================================================
+
+src/core/signal.ts
+    Signal 类型、三值信号、信号工具函数
+
+src/core/neuron.ts
+    Neuron / Branch / Gate 定义与 updateNeuron
+
+src/core/synapse.ts
+    Synapse 定义、传播函数、权重计算
+
+src/core/development.ts
+    连接形成、候选连接、剪枝、冷却机制
+
+src/core/plasticity.ts
+    eligibility、fastWeight、stableWeight、固化/反固化
+
+src/core/evaluation.ts
+    Test A/B/C/D/E 离线测试
+
+src/simulation/world.ts
+    后期二维环境，不要在第一阶段承载全部逻辑
+
+src/export/networkExport.ts
+    网络状态导出
+
+src/config/newModelConfig.ts
+    新模型参数集中定义
+
+
+============================================================
+21. 最小参数建议
+============================================================
+
+dt = 0.01
+baseThreshold = 1.0
+dynamicThresholdRange = [0.7, 1.5]
+refractorySteps = 2~5
+
+branchLocalThreshold = 0.4
+dendriteGateThreshold = 0.8
+axonThreshold = 1.0
+
+fastWeightInit = 0.05~0.2
+stableWeightInit = 0
+maxWeight = 2.0
+
+candidateMaxAge = 1000 ticks
+dormantLimit = 3000 ticks
+baseCooldown = 500 ticks
+
+fastLearningRate = 0.005~0.02
+stableCaptureRate = 0.01~0.05
+fastDecay = 0.999
+stableDecay = 0.99999
+
+targetSpikeRate = 0.03~0.08
+thresholdAdaptRate = 0.0001~0.001
+
+
+============================================================
+22. 最终建议
+============================================================
+
+不要直接改旧主干。
+建议新建一个 experimental-v2 或 src/core-v2。
+
+第一阶段只跑离线测试，不接二维环境。
+等 Test A~E 全部通过后，再把旧项目的可视化、导出、二维环境复用回来。
+
+重构时保留旧项目中有价值的部分：
+- episode export
+- metrics panel
+- food/toxin world
+- learningOn/off 对比
+- reward baseline / RPE
+- stable/labile 双权重经验
+- frozenInterneuron 诊断思想
+
+但暂时不要复用旧项目中已经高度耦合的学习主循环。

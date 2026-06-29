@@ -1,0 +1,167 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { defaultConfig } from "../src/config/newModelConfig";
+import { arbitrateMotorAction } from "../src/core/arbitration";
+import { formatAuditReport, runPre2DAudit } from "../src/core/audit";
+import { runAllEvaluations, runLearningDemo } from "../src/core/evaluation";
+import { explainTrace, runLearningTrace } from "../src/core/trace";
+import { createChallengePretrainExports } from "../src/export/challengePretrainExport";
+import { formatWorld2DAuditReport, runWorld2DAudit } from "../src/world/audit2d";
+import { formatWorld2DChallengeAuditReport, runWorld2DChallengeAudit } from "../src/world/audit2dChallenge";
+import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
+import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
+
+test("offline evaluation suite passes Test A-E", () => {
+  const results = runAllEvaluations(defaultConfig);
+  assert.deepEqual(
+    results.map((result) => ({ name: result.name, passed: result.passed })),
+    results.map((result) => ({ name: result.name, passed: true }))
+  );
+});
+
+test("learning demo exports a trained network snapshot", () => {
+  const demo = runLearningDemo(defaultConfig);
+  assert.equal(demo.metrics.accuracy, 1);
+  assert.ok(demo.network.synapses.length > 0);
+  assert.ok(demo.events.length > 0);
+});
+
+test("learning trace records propagation, gate snapshots, and supervised weight changes", () => {
+  const trace = runLearningTrace(defaultConfig, { epochs: 2, learningOn: true });
+  const first = trace.episodes[0];
+  const supervisedEvent = trace.episodes
+    .flatMap((episode) => episode.weightEvents)
+    .find((event) => event.kind === "supervised");
+
+  assert.equal(trace.episodes.length, 8);
+  assert.equal(first.inputLabel, "foodLeft");
+  assert.equal(first.targetMotorId, "leftMotor");
+  assert.equal(first.phases.length, 2);
+  assert.ok(first.phases[0].propagationEvents.length > 0);
+  assert.ok(first.phases[0].neurons.some((neuron) => neuron.branches.some((branch) => branch.active)));
+  assert.ok(supervisedEvent);
+  assert.notEqual(supervisedEvent.beforeFastWeight, supervisedEvent.afterFastWeight);
+  assert.match(supervisedEvent.feedback, /^supervised-/);
+});
+
+test("learning-off trace keeps runtime evidence without supervised or capture updates", () => {
+  const trace = runLearningTrace(defaultConfig, { epochs: 1, learningOn: false });
+  const weightEvents = trace.episodes.flatMap((episode) => episode.weightEvents);
+
+  assert.ok(trace.episodes.some((episode) => episode.phases.some((phase) => phase.propagationEvents.length > 0)));
+  assert.equal(weightEvents.some((event) => event.kind === "supervised" || event.kind === "capture"), false);
+});
+
+test("trace explanation summarizes path and weight feedback", () => {
+  const trace = runLearningTrace(defaultConfig, { epochs: 1, learningOn: true });
+  const explanation = explainTrace(trace);
+
+  assert.match(explanation, /Trace dg-snn-trace-v0\.1/);
+  assert.match(explanation, /input foodLeft -> target leftMotor/);
+  assert.match(explanation, /Active paths:/);
+  assert.match(explanation, /supervised-target-reinforce/);
+});
+
+test("pre-2D audit passes required suites and keeps diagnostic boundaries visible", () => {
+  const report = runPre2DAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const diagnosticSuites = report.suites.filter((suite) => !suite.required);
+  const formatted = formatAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 4);
+  assert.ok(diagnosticSuites.length >= 1);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.match(formatted, /fixed-topology supervised offline learning/);
+  assert.match(formatted, /input edge-case diagnostics/);
+});
+
+test("motor arbitration records noop, single action, and conflict", () => {
+  assert.equal(arbitrateMotorAction([]).action, "noop");
+  assert.equal(arbitrateMotorAction(["leftMotor"]).action, "left");
+  assert.equal(arbitrateMotorAction(["rightMotor"]).action, "right");
+  assert.equal(arbitrateMotorAction(["leftMotor", "rightMotor"]).action, "conflict");
+});
+
+test("2D-lite audit passes required suites and records conflict arbitration", () => {
+  const report = runWorld2DAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const conflictSuite = report.suites.find((suite) => suite.name === "2D-lite composite and conflict arbitration");
+  const formatted = formatWorld2DAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 6);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.equal(conflictSuite?.metrics.conflictDecision, "conflict");
+  assert.equal(conflictSuite?.metrics.conflictTaskSuccess, false);
+  assert.match(formatted, /2D-lite/);
+  assert.match(formatted, /fixed-topology supervised world tasks/);
+});
+
+test("2D-challenge audit passes required bottleneck suites and reports reward-only feasibility", () => {
+  const report = runWorld2DChallengeAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const rewardOnlySuite = report.suites.find((suite) => suite.name === "2D-challenge reward-only feasibility");
+  const conflictSuite = report.suites.find((suite) => suite.name === "2D-challenge conflict boundary");
+  const formatted = formatWorld2DChallengeAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 7);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.ok(Number(rewardOnlySuite?.metrics.rewardUpdateCount ?? 0) > 0);
+  assert.equal(conflictSuite?.metrics.firstExecutedAction, "conflict");
+  assert.match(formatted, /2D-challenge/);
+  assert.match(formatted, /reward-only/);
+});
+
+test("2D-challenge pretrained exports preserve learned network snapshots", () => {
+  const exports = createChallengePretrainExports(defaultConfig, { outputDir: "exports/test-pretrained" });
+  const modes = exports.map((item) => item.mode).sort();
+  const rewardOnly = exports.find((item) => item.mode === "rewardOnly");
+  const supervised = exports.find((item) => item.mode === "supervised");
+
+  assert.deepEqual(modes, ["rewardOnly", "supervised"]);
+  assert.ok(rewardOnly);
+  assert.ok(supervised);
+  assert.ok(rewardOnly.snapshot.synapses.length > 0);
+  assert.ok(supervised.snapshot.synapses.length > 0);
+  assert.equal(rewardOnly.snapshot.metrics.learningMode, "rewardOnly");
+  assert.equal(supervised.snapshot.metrics.learningMode, "supervised");
+  assert.ok(Number(rewardOnly.snapshot.metrics.rewardUpdateCount) > 0);
+  assert.ok(Number(supervised.snapshot.metrics.supervisedUpdateCount) > 0);
+  assert.equal(rewardOnly.snapshot.events[0] && typeof rewardOnly.snapshot.events[0], "object");
+});
+
+test("transfer audit passes required suites and reports pretrained-vs-fresh separation", () => {
+  const report = runTransferAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const formatted = formatTransferAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 5);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.match(formatted, /transfer/);
+  assert.match(formatted, /pretrained/);
+});
+
+test("transfer matrix aggregates stress axes and enforces rewardOnly/continued-learning gates", async () => {
+  const report = await runTransferAuditMatrix({
+    pretrainSeeds: [101, 102],
+    evalSeedSets: [[201, 202, 203]],
+    concurrency: 2
+  });
+  const formatted = formatTransferMatrixReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.equal(report.summary.cellsRun, 2);
+  assert.ok(report.summary.rewardOnlySuccessSeparation);
+  assert.ok(report.summary.dropout02.rewardOnlyDelta);
+  assert.ok(report.summary.dropout03.rewardOnlyDelta);
+  assert.ok(report.summary.continuedLearning);
+  assert.equal(report.summary.continuedLearning.reversals.length, 0);
+  assert.ok(report.summary.rewardOnlyMeanRewardDelta.min > 0);
+  assert.ok(report.summary.rewardOnlySuccessSeparation.min >= 0);
+  assert.ok(report.summary.continuedLearning.separation.min >= 0);
+  assert.match(formatted, /Stress axes:/);
+  assert.match(formatted, /continued-learning/);
+});
