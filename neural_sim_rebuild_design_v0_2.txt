@@ -347,9 +347,32 @@ if synapse.state == stable
        stableWeight *= stableDecay
        synapse.state = active or dormant
 
+错误驱动主动去固化（必须实现，不能省略）：
+
+if postNeuron wrongly active
+   and synapse contributed (eligibilityTrace > 0)
+   and synapse.state == stable:
+       stableWeight -= depotentiationRate * eligibilityTrace
+       if stableWeight < stableThreshold:
+           synapse.state = active   # deconsolidated back to active
+
+这条与上面的慢速反固化路径并列，两者缺一不可：
+- 慢速路径（recentContribution < negativeThreshold for longTime）：处理"长期不贡献"的被动遗忘
+- 错误驱动路径（post wrongly active）：处理"已固化但持续驱动错误行为"的主动去固化
+
 注意：
 不要让 stableWeight 永久不可动。
 否则早期错误连接会被锁死。
+
+实现验证（acceptance gate）：
+- 用反向映射预训练直到固化（stableWeight 接近 maxWeight）
+- 切回正确映射，给少量继续训练预算
+- 若 successRate 恒为 0、stableWeight 不下降 → 缺错误驱动去固化路径，是结构缺失
+- 若 successRate 随训练上升、wrong 突触 stableWeight 下降 → 规则生效
+
+参数建议：
+depotentiationRate = 0.005 ~ 0.02（显著小于 supervisedLearningRate，慢时间尺度）
+negativeThreshold = -contributionThreshold 或独立配置
 
 
 ============================================================
@@ -1031,6 +1054,10 @@ fastLearningRate = 0.005~0.02
 stableCaptureRate = 0.01~0.05
 fastDecay = 0.999
 stableDecay = 0.99999
+
+# 错误驱动去固化（必须实现，否则 wrong-prior 测的是结构缺失不是 unlearning）
+depotentiationRate = 0.005~0.02
+negativeThreshold = -0.15   # 与 contributionThreshold 对称，标记"持续负贡献"
 
 targetSpikeRate = 0.03~0.08
 thresholdAdaptRate = 0.0001~0.001
