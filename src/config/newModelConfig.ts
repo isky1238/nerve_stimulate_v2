@@ -29,6 +29,8 @@ export interface ModelConfig {
   contributionThreshold: number;
   fastDecay: number;
   stableDecay: number;
+  depotentiationRate: number;
+  negativeThreshold: number;
 
   connectionDistanceLambda: number;
   connectionThreshold: number;
@@ -76,6 +78,8 @@ export const defaultConfig: ModelConfig = Object.freeze({
   contributionThreshold: 0.15,
   fastDecay: 0.999,
   stableDecay: 0.99999,
+  depotentiationRate: 0.02,
+  negativeThreshold: -0.15,
 
   connectionDistanceLambda: 8,
   connectionThreshold: 0.25,

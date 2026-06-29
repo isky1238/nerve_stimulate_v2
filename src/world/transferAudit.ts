@@ -609,6 +609,7 @@ function auditWrongPriorDiagnostic(
     learningMode: "supervised",
     initialNetwork: wrongPriorNetwork
   });
+  const postCDSynapseDump = dumpWrongPriorSynapseState(pretrained.network, config);
   const fresh = runChallengeExperiment(config, {
     seed: cell.auditSeed,
     trainSeeds: CONTINUED_LEARNING_TRAIN_SEEDS,
@@ -632,7 +633,11 @@ function auditWrongPriorDiagnostic(
       wrongDirectionMaxStableWeight: synapseDump.wrongDirectionMaxStableWeight,
       wrongDirectionMaxFastWeight: synapseDump.wrongDirectionMaxFastWeight,
       correctDirectionMaxFastWeight: synapseDump.correctDirectionMaxFastWeight,
-      dualLockConfirmed: synapseDump.wrongDirectionStableCount > 0
+      dualLockConfirmed: synapseDump.wrongDirectionStableCount > 0,
+      postCLWrongDirectionStableCount: postCDSynapseDump.wrongDirectionStableCount,
+      postCLWrongDirectionMaxStableWeight: postCDSynapseDump.wrongDirectionMaxStableWeight,
+      postCLWrongDirectionMaxFastWeight: postCDSynapseDump.wrongDirectionMaxFastWeight,
+      postCLDualLockConfirmed: postCDSynapseDump.wrongDirectionStableCount > 0
     },
     conclusion:
       separation < 0
@@ -713,7 +718,7 @@ function dumpWrongPriorSynapseState(
   lines.push(`dualLock=${wrongDirectionStableCount > 0} (if true, stableWeight drives wrong motor even after fastWeight unlearn)`);
   lines.push("=== end dump ===");
 
-  console.log(lines.join("\n"));
+  process.stderr.write(lines.join("\n") + "\n");
 
   return {
     wrongDirectionStableCount,
