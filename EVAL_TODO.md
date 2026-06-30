@@ -184,12 +184,35 @@ Scope: `/root/research/nerve_stimulate_v2`
 1. 两阶段语义链已搭通,supervised 不破(18/18,requiredPassed=true),红线不翻负(rew delta 0.275>0)。
 2. rewardOnly 行为低于 baseline(SR 0.25 vs 0.5),属计划预期"效果差后期解决"。
 3. 诊断坐实两个结构性问题(非 seed 随机性、非参数微调能解):
-   - **STDP LTD 半边在两 tick 结构下不激活**(post-before-pre 时序罕见)→ STDP 退化纯 LTP,失去"削弱错误突触"的能力。这是时间窗+拓扑的耦合问题,粗颗粒度 trace 衰减无法解,需统一度量衡时的传导延迟/物理时间轴。
-   - **eligibility 幅度比 baseline 弱 ~5-20x**(归一化+STDP 稀疏性)→ 依赖 elig 幅度的学习(rewardOnly 建通路、supervised stable 去固化)都变慢/失效。
+   - ~~**STDP LTD 半边在两 tick 结构下不激活**(post-before-pre 时序罕见)→ 需统一度量衡时的传导延迟/物理时间轴。~~ **已推翻,见 E2 修订**:LTD 失效根因是 trace 归一化 bug(时间窗被压成 1 步),不是拓扑/时序,修好 trace 后 LTD 半边活了。
+   - **eligibility 幅度比 baseline 弱 ~5-20x**(归一化+STDP 稀疏性)→ 依赖 elig 幅度的学习(rewardOnly 建通路、supervised stable 去固化)都变慢/失效。**E2 部分缓解**:trace 修复后 supervised stable 去固化恢复(postCL wrongMaxStable 1.99986→0.766)。
 4. **新载体不能自愈 rewardOnly 的 stable 锁** → 印证"reward→stable 去固化开关仍必要"(与 C 档 #3 一致),但单加它(上一轮 C3 结论)不充分,需与新载体同治。
-5. 下一步优先级:统一度量衡(物理时间轴/传导延迟,让 LTD 半边能激活 + eligibility 幅度重定标),再评估是否补 reward→stable 去固化。本轮不补,守住"先看新载体能否自愈"的归因干净性。
+5. ~~下一步优先级:统一度量衡(物理时间轴/传导延迟,让 LTD 半边能激活 + eligibility 幅度重定标)~~ **E2 修订**:LTD 半边已靠 trace 修复激活,传导延迟/物理时间轴降级为可选优化(非必需)。下一步优先级改为:eligibility 幅度重定标 + 评估补 reward→stable 去固化。
 
-**E 档不做(本分支 out of scope,留统一度量衡):** 物理时间轴(tick→ms)、传导延迟队列、严格 τ₊/τ₋ 生物数值对齐、reward→stable 去固化开关。
+### E2. 时间窗 bug 修复 + haiku agent 分发复测(2026-06-30,commit 36ea064 + 9346645)
+
+**方法**:主诊断者卡在"LTD 失效根因"判定上(先判活动率不对称,试 per-tick 更新回归后放弃)。按用户要求分发 4 个 haiku agent,同一提示词、同一证据、彼此盲测,独立找盲点。
+
+**4 agent 共识:**
+- `eligibilityDecay=0.9` 是放大器,非根因(慢衰减积分器把每步微小净偏置放大成巨大累积)。
+- per-tick 更新放弃**是对的**(agent 都分析:tick1 时 motor 还没发,会产生"未授权 LTD"或两边归零,不解决核心)。
+- 活动率不对称存在,但幅度被误判/非主因。
+- 5e8 的 balance 部分是**比值假象**(`sumPos/(sumNegAbs+1e-9)`,分母趋 0 时爆炸),非"LTP 极其巨大"。
+
+**agent C 独家发现(主诊断者忽视的真根因):trace 归一化 bug。** 主诊断者写的 `(trace*decay + active) / (1/(1-decay))` 不是"归一化到 [0,1]"——除以 1/(1-decay) 同时把衰减率乘了 (1-decay),有效衰减 = `decay*(1-decay)` = 0.1275(traceDecay=0.85),**trace 时间常数从 ~6.7 步压缩到 ~1.1 步**。跨步 STDP 时序(尤其 post-before-pre LTD)在 1 步记忆下无法表达 → LTD 失效。数学验证:声称稳态 1.0,实际 0.172。
+
+**修复 1(commit 36ea064):trace 用正确 EMA。** `trace = trace*decay + active*(1-decay)`,稳态=1.0,时间常数~1/(1-decay) 步。结果:LTP/LTD balance 5e8→~1.5(fracNeg 0.02→0.19-0.31,LTD 半边活了)。但 rewardOnly 反而退化(SR 0.25→0、noop 0.947→1.0,红线 rew delta 0.275→0)——因为 trace 记忆 6x 更久后,无 sensory 步的 preTrace 残留单边 LTP 更严重。
+
+**修复 2(commit 9346645,agent A/B/C 一致推荐):LTP 门控 preActive。** `ltpElig = stdpLtpRate × preTrace × postActive × preActive × bap`。无 sensory 步(preActive=0)LTP=0,不单边积累。LTD 仍门控 preActive(post-before-pre 需 pre 当前发才能检测 post 先发)。结果:rewardOnly SR 0→0.25/noop 1.0→0.947(恢复 Phase 2 水平);test 16/18→17/18;balance fracPos 1.0→0.5/fracNeg 0→0.5(近对称);**红线 rew delta 0→0.55(回到 baseline 水平,不翻负)**、success sep 0.5、continuedLearning 0;supervised wrong-prior stable 去固化部分恢复(postCL wrongMaxStable 1.99986→0.766、stableCount 4→2)。
+
+**E2 关键结论:**
+1. **"先修时间轴"修对的是 trace 时间窗 bug,不是加传导延迟/物理 ms。** 用户的"先修时间轴不然判断不了"判断正确——但根因是主诊断者自己写坏的 trace 归一化,不是 STDP 本身或拓扑。修好后 STDP LTD 半边活了,传导延迟/物理时间轴降级为可选优化。
+2. **主诊断者之前把"LTD 失效根因"判为"活动率不对称"是错的**——agent 分发纠正了。教训:单人诊断易陷自己推理闭环;分发独立 agent(同提示词、彼此盲)能有效打破。agent C 的数学验证(声称稳态 1.0 实际 0.172)是决定性证据。
+3. requiredPassed=false 只因 rewardOnly pretrain SR=0(效果差,预期),**不是红线翻负、不是崩溃**(matrix 偶发 fork crash 是并发竞态,重跑可复现真实状态)。
+4. rewardOnly 仍弱(SR 0.25 vs baseline 0.5)——属"效果差后期解决",但 STDP 语义链现在健康(LTP/LTD 对称、supervised 不破、红线不翻负)。
+5. 下一步:eligibility 幅度重定标 + 评估补 reward→stable 去固化。传导延迟/物理时间轴非必需。
+
+**E 档不做(本分支 out of scope):** ~~物理时间轴(tick→ms)、传导延迟队列~~(E2 后降级为可选)、严格 τ₊/τ₋ 生物数值对齐、reward→stable 去固化开关。
 
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
