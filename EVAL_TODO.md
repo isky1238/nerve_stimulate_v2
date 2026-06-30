@@ -212,28 +212,44 @@ Scope: `/root/research/nerve_stimulate_v2`
 4. rewardOnly 仍弱(SR 0.25 vs baseline 0.5)——属"效果差后期解决",但 STDP 语义链现在健康(LTP/LTD 对称、supervised 不破、红线不翻负)。
 5. 下一步:eligibility 幅度重定标 + 评估补 reward→stable 去固化。传导延迟/物理时间轴非必需。
 
-### E3. single-stimulus 轨迹追踪 — 推翻 rewardOnly "全局 noop 塌缩" 误判(2026-06-30,`scripts/single_stim_trace.cjs`)
+### E3. single-stimulus 轨迹追踪 — 推翻 rewardOnly "全局 noop 塌缩" 误判(2026-06-30,`scripts/snapshot_analyze.cjs`)
 
-**工具**:激活单个 sensor(foodLeft/foodRight/toxinLeft/toxinRight),手动跑两 tick 传播,逐层记录 sensory→inter stem、inter 发放、inter→motor 各突触 eff/fast/stable/elig/preTrace/postTrace、motor 发放 + branch 输入。给出"刺激走到哪、被谁放大/削弱、为何(没)驱动正确 motor"的逐突触机制视图。与多 seed 聚合 audit 正交:per-step、per-synapse 而非聚合 SR。用法:`SNAPSHOT=supervised|rewardOnly node scripts/single_stim_trace.cjs <sensorId>`。
+**工具(两种快照模式,固化)**:
+- **权重快照**(`weights` 模式):全量网络状态分析。列所有 sensory→inter stem + inter→motor 突触的 eff/fast/stable/elig/state,按 CORRECT/WRONG 分组,给"哪些通路建够(DRIVES)/没建够(weak)"汇总。不模拟,只读已学权重。
+- **路径快照**(`path` 模式):单刺激轨迹**模拟**,用真实 `runChallengeEpisode` 跑完整多步 episode(非手动 tick),逐 case 记录 success/steps/actions/reward + step-0 逐突触传播细节(哪个 inter 发、motor axonDrive 多少、为何没到阈值)。
+- 用法:`SNAPSHOT=supervised|rewardOnly node scripts/snapshot_analyze.cjs weights|path [food-left|food-right|toxin-left|toxin-right|all]`。旧 `single_stim_trace.cjs`(手动两 tick)已删除,被本工具替代(path 模式用真实 episode 更严谨)。
+
+**权重快照全量证据(rewardOnly):**
+| inter | CORRECT motor | eff | 状态 | wrong-max\|eff\| |
+|---|---|---|---|---|
+| iFoodLeft | leftMotor | 1.990 | DRIVES | 0.191 |
+| iFoodRight | rightMotor | 1.490 | DRIVES | 0.247 |
+| iToxinLeft | rightMotor | 0.456 | weak | 0.086 |
+| iToxinRight | leftMotor | 0.437 | weak | 0.024 |
+→ food 两条通路**对称**建够(1.49-1.99),toxin 两条通路**对称**没建够(0.43-0.46),wrong-direction 全 <0.25(正确削低)。不是随机失败,是 toxin 这一类特异地弱。
+
+**路径快照真实 episode 证据(rewardOnly,4 case):**
+- food-right:success=true,2步 right/right。iFoodRight 发→rightMotor axonDrive=1.490≥1→发。✓
+- toxin-left:success=false,12步 noop。iToxinLeft 发→rightMotor axonDrive=0.456<1→不发→noop。
+- toxin-right:success=false,12步 noop。iToxinRight 发→leftMotor axonDrive=0.437<1→不发→noop。
+(food-left 同理 success,见前轮)→ 严谨复现"food success / toxin noop",非手动 tick 推断。
 
 **关键发现(颠覆 E 档 #2 + E2 的 rewardOnly 诊断):**
 - rewardOnly 预训练快照**不是全局 noop**。frozen eval 逐场景:food 场景全部 success(left/right 正确,2步拿食物,reward=1.1);toxin 场景全部 noop(12步)。
-- single-stim trace 解释因果:
-  - foodLeft 刺激→iFoodLeft 发→`iFoodLeft->leftMotor [CORRECT] eff=1.990`(stable=1.887,接近满分)→leftMotor 发→正确。food 通路**发育成功**。
-  - toxinLeft 刺激→iToxinLeft 发→`iToxinLeft->rightMotor [CORRECT] eff=0.456`(stable=0.252,远低于阈值 1.0)→rightMotor axonDrive=0.456<1.0→**不发→noop**。toxin 回避通路**没建够**。
+- 因果(路径快照):food 通路 eff=1.99 发育成功;toxin 通路 eff=0.456 够不到 motor 阈值 1.0→noop。
 - audit 报的 "SR=0.25/noop=0.947" 是 food(2步成功)+toxin(12步 noop)混合的**统计假象**,把"toxin 通路弱"误读成"整体 noop 塌缩"。
 
 **对前几轮诊断的修正:**
 1. E 档 #2 "rewardOnly SR 0.25 vs baseline 0.5,效果差" + E2 "rewardOnly SR 0→0.25" 的归因(credit assignment/eligibility 幅度/stable 锁)**部分瞄错靶子**。rewardOnly 真问题不是全局塌缩,是 **toxin 回避通路特异地建不夠**(eff 0.456 vs food 1.99)。
 2. 500ep wrong-prior 自愈"吸收态"(E 档 #4/E2)结论仍成立(那是 wrong-prior 注入场景),但**不该外推到正常 rewardOnly 训练**——正常训练下 rewardOnly 的 food 通路发育成功。
-3. 验证用户第 4 条原则("发育需过程/机遇,别把通路未建成当 bug 忽视"):rewardOnly 确实发育出了一半正确通路(food),之前盯着聚合 SR 判"模型坏"忽视了这点。single-stim trace 一个工具就推翻了 3 轮聚合诊断的误判。
+3. 验证用户第 4 条原则("发育需过程/机遇,别把通路未建成当 bug 忽视"):rewardOnly 确实发育出了一半正确通路(food),之前盯着聚合 SR 判"模型坏"忽视了这点。snapshot_analyze 一个工具就推翻了 3 轮聚合诊断的误判。
 
 **真问题定位(待 E4 解决):toxin 回避的 credit assignment。**
 - food 逼近:做动作→拿到食物→正 reward→强化通路。直接,通路建到 eff=1.99。
 - toxin 回避:做动作→没碰 toxin→**避免**了负 reward。但"避免"不产生正 reward 信号(拿到的是"没扣分",reward=0 或弱)→ credit 弱→通路只建到 eff=0.456,够不到 motor 阈值→noop。
 - 这是"避免负信号如何产生等价强化"的结构缺口,与 food 逼近的"正信号直接强化"不对称。用户已有关于"负面信号产生加强刺激"的新想法(待 E4)。
 
-**E3 结论:single-stim trace 工具固化。下一步从"加 stable 去固化开关"转向"解决 toxin 回避 credit assignment(避免负 reward 的强化信号)",等用户新想法。**
+**E3 结论:snapshot_analyze(weights+path 双模式)固化。下一步从"加 stable 去固化开关"转向"解决 toxin 回避 credit assignment(避免负 reward 的强化信号)",等用户新想法。**
 
 **E 档不做(本分支 out of scope):** ~~物理时间轴(tick→ms)、传导延迟队列~~(E2 后降级为可选)、严格 τ₊/τ₋ 生物数值对齐、reward→stable 去固化开关(E3 后降级:wrong-prior 仍需,但正常 rewardOnly 的主问题是 toxin credit assignment,优先级让位)。
 
