@@ -27,6 +27,22 @@ export interface ModelConfig {
   fastLearningRate: number;
   rewardAdvantageBaselineAlpha: number;
   /**
+   * STDP LTP/LTD relative-asymmetry factors for the BAP-weighted eligibility rule
+   * (Phase 1 of the STDP/BAP baseline refactor). Eligibility is a SIGNED scalar:
+   *   ltp = stdpLtpRate * preTrace * postActive * bapWeight   (pre-before-post → strengthen)
+   *   ltd = stdpLtdRate * postTrace * preActive * bapWeight   (post-before-pre → weaken)
+   *   eligibilityTrace = eligibilityTrace * eligibilityDecay + ltp - ltd
+   * bapWeight = effectSign * |effectiveWeight| (keeps inhibitory sign, scales by
+   * synaptic contribution). preTrace/postTrace are steady-state-normalized to [0,1]
+   * so eligibility peaks at ~|effectiveWeight| (same order as the old ±1 coactivity
+   * baseline), keeping downstream fastLearningRate scaling unchanged. These factors
+   * default to 1.0 (symmetric LTP/LTD); tune the ratio for LTD>LTP asymmetry.
+   * Coarse-grained: the time window is traceDecay-relative, NOT physical ms (deferred
+   * to the unify-units pass).
+   */
+  stdpLtpRate: number;
+  stdpLtdRate: number;
+  /**
    * Exploration strategy for rewardOnly training.
    * - "conflictGated" (default): force a random motor only when the network fails
    *   to commit (noop/conflict). Masks noop from the learner during training, but
@@ -47,6 +63,23 @@ export interface ModelConfig {
   stableThreshold: number;
   useThreshold: number;
   contributionThreshold: number;
+  /**
+   * Phase 2: per-post-spike divisive normalization of positive (LTP) eligibility.
+   * When true, for each post that just spiked, its incoming synapses' positive
+   * eligibility is scaled by 1/Σ(positive eligibility) so total LTP credit per
+   * post-spike is bounded at 1.0. Directly counters the "normal-summation" risk
+   * where many weak synapses each claim full credit for a co-driven firing.
+   * LTD (negative eligibility) is NOT normalized — it is a distinct credit signal.
+   */
+  eligibilityNormalization: boolean;
+  /**
+   * Phase 2: gain for the reward-derived modulator. The modulator is a global
+   * scalar modulating plasticityGate: modulator = tanh(|rewardAdvantage| * gain).
+   * rewardOnly: advantage≈0 → modulator≈0 (no learning); large |advantage| → 1.
+   * supervised: modulator is forced to 1 (explicit target signal, no modulation).
+   * Composes with (does not replace) the inhibition-freeze binary gate.
+   */
+  modulatorGain: number;
   fastDecay: number;
   stableDecay: number;
   depotentiationRate: number;
@@ -119,6 +152,10 @@ export const configFieldGroups = Object.freeze({
     "traceDecay",
     "fastLearningRate",
     "rewardAdvantageBaselineAlpha",
+    "stdpLtpRate",
+    "stdpLtdRate",
+    "eligibilityNormalization",
+    "modulatorGain",
     "supervisedLearningRate",
     "stableCaptureRate",
     "fastDecay",
@@ -155,6 +192,10 @@ export const defaultConfig: ModelConfig = Object.freeze({
   traceDecay: 0.85,
   fastLearningRate: 0.01,
   rewardAdvantageBaselineAlpha: 0.1,
+  stdpLtpRate: 1.0,
+  stdpLtdRate: 1.0,
+  eligibilityNormalization: true,
+  modulatorGain: 1.0,
   explorationStrategy: "conflictGated",
   explorationEpsilon: 0.2,
   supervisedLearningRate: 0.08,

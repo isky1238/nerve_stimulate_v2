@@ -279,6 +279,11 @@ function runComplexNetworkStep(
         }
       }
     }
+
+    // Update eligibility per micro-tick so each tick's spike events feed the STDP
+    // time window (preTrace / postTrace accumulate across micro-ticks via traceDecay).
+    // Previously this ran once after the loop, collapsing all micro-tick timing.
+    updateNetworkEligibility(network, config);
   }
 
   for (const neuron of network.neurons) {
@@ -322,8 +327,6 @@ function runComplexNetworkStep(
     : rawActiveMotors;
   const executedAction = resolverAction ?? explorationAction ?? networkDecision.action;
   let supervisedUpdates = 0;
-
-  updateNetworkEligibility(network, config);
 
   if (options.learningEnabled && options.learningMode === "supervised") {
     supervisedUpdates = applySupervisedMotorOutcomeLearning(network, expectedAction, new Set(activeMotors), config);

@@ -29,17 +29,90 @@ export function updateEligibility(
 
     const preActive = isActiveSignal(pre.outputSignal) ? 1 : 0;
     const postActive = post.spike ? 1 : 0;
-    synapse.preTrace = synapse.preTrace * config.traceDecay + preActive;
-    synapse.postTrace = synapse.postTrace * config.traceDecay + postActive;
+    // preTrace / postTrace are decaying accumulators of recent pre / post activity.
+    // They were previously computed but unused (dead code). They now carry the STDP
+    // time window: at the moment of a post spike, preTrace holds the memory of
+    // recent pre activity (pre-before-post → LTP); at a pre spike, postTrace holds
+    // the memory of recent post activity (post-before-pre → LTD).
+    // Steady-state normalized: a constantly-firing neuron's trace saturates at
+    // 1/(1-traceDecay); we divide by that so the trace expresses "recent activity
+    // rate" in [0,1] regardless of traceDecay. Without this, a motor that fires
+    // every step saturates postTrace to ~6.7 (traceDecay=0.85) and the LTD term
+    // dominates LTP — collapsing all learning.
+    const traceSteadyState = 1 / (1 - config.traceDecay);
+    synapse.preTrace = (synapse.preTrace * config.traceDecay + preActive) / traceSteadyState;
+    synapse.postTrace = (synapse.postTrace * config.traceDecay + postActive) / traceSteadyState;
 
-    const coactivity = preActive * postActive;
+    // BAP-weighted STDP eligibility. bapWeight keeps the synapse's effectSign
+    // (so inhibitory synapses keep negative credit) and scales by |effectiveWeight|
+    // — the "how much did this synapse drive the post" contribution that pure binary
+    // coactivity discarded. eligibilityTrace is now a SIGNED scalar
+    // (positive = LTP bias, negative = LTD bias), peaking at ~|effectiveWeight|
+    // (same order as the old coactivity*sign(eff)=±1 baseline) so downstream
+    // fastLearningRate scaling is unchanged. stdpLtpRate/stdpLtdRate act as
+    // LTP/LTD relative-asymmetry factors (default 1.0 each), NOT tiny rate constants.
+    const bapWeight = synapse.effectSign * Math.abs(synapse.effectiveWeight);
+    const ltpElig = config.stdpLtpRate * synapse.preTrace * postActive * bapWeight;
+    const ltdElig = config.stdpLtdRate * synapse.postTrace * preActive * bapWeight;
     synapse.eligibilityTrace =
-      synapse.eligibilityTrace * config.eligibilityDecay + coactivity * Math.sign(synapse.effectiveWeight || 1);
+      synapse.eligibilityTrace * config.eligibilityDecay + ltpElig - ltdElig;
+
+    // recentContribution still tracks absolute contribution magnitude (used by
+    // captureStableWeights gates). BAP weighting changes its meaning slightly
+    // (driven by post firing rather than binary coactivity) but the magnitude
+    // semantics for capture are preserved.
     synapse.recentContribution = ema(
       synapse.recentContribution,
-      coactivity > 0 ? Math.abs(synapse.effectiveWeight) : 0,
+      postActive ? Math.abs(synapse.effectiveWeight) : 0,
       config.emaAlpha
     );
+  }
+}
+
+/**
+ * Phase 2: per-post-spike divisive normalization of positive (LTP) eligibility.
+ * For each post that just spiked, scale its incoming synapses' positive
+ * eligibility by 1/Σ(positive eligibility) so total LTP credit per post-spike is
+ * bounded at 1.0 — counters the "normal-summation" risk where many weak synapses
+ * each claim full credit. LTD (negative eligibility) is left untouched.
+ */
+export function normalizeEligibility(
+  synapses: Synapse[],
+  neuronsById: Map<string, Neuron>
+): void {
+  const byPost = new Map<string, Synapse[]>();
+  for (const synapse of synapses) {
+    if (!isConductingSynapse(synapse)) {
+      continue;
+    }
+    const list = byPost.get(synapse.postNeuronId);
+    if (list) {
+      list.push(synapse);
+    } else {
+      byPost.set(synapse.postNeuronId, [synapse]);
+    }
+  }
+
+  for (const [postId, incoming] of byPost) {
+    const post = neuronsById.get(postId);
+    if (!post || !post.spike) {
+      continue;
+    }
+    let ltpSum = 0;
+    for (const synapse of incoming) {
+      if (synapse.eligibilityTrace > 0) {
+        ltpSum += synapse.eligibilityTrace;
+      }
+    }
+    if (ltpSum <= 1e-12) {
+      continue;
+    }
+    const scale = 1 / ltpSum;
+    for (const synapse of incoming) {
+      if (synapse.eligibilityTrace > 0) {
+        synapse.eligibilityTrace *= scale;
+      }
+    }
   }
 }
 
@@ -109,9 +182,15 @@ export function applySupervisedMotorLearning(
 
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
 
-    if (wasWronglyActive && synapse.state === "stable" && synapse.eligibilityTrace > 0) {
+    if (wasWronglyActive && synapse.state === "stable") {
+      // Stable depotentiation: trigger on wasWronglyActive (the motor fired when it
+      // shouldn't have) — pre activity is already guaranteed by the isActiveSignal
+      // gate above, so this synapse contributed to the wrong firing. Under STDP the
+      // eligibilityTrace is signed (some wrong synapses go negative via post-before-pre
+      // LTD); the depotentiation magnitude uses |eligibilityTrace| so the sign cannot
+      // shield a wrong-direction stable synapse from depotentiation.
       const stableBefore = synapse.stableWeight;
-      const stableDelta = -config.depotentiationRate * synapse.eligibilityTrace * plasticityGate;
+      const stableDelta = -config.depotentiationRate * Math.abs(synapse.eligibilityTrace) * plasticityGate;
       synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
       if (synapse.stableWeight < config.stableThreshold) {
         synapse.state = "active";
