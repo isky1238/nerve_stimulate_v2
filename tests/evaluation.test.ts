@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { defaultConfig } from "../src/config/newModelConfig";
+import { defaultConfig, withConfig } from "../src/config/newModelConfig";
 import { arbitrateMotorAction } from "../src/core/arbitration";
 import { formatAuditReport, runPre2DAudit } from "../src/core/audit";
 import { runAllEvaluations, runLearningDemo } from "../src/core/evaluation";
@@ -9,6 +9,7 @@ import { createChallengePretrainExports } from "../src/export/challengePretrainE
 import { formatWorld2DAuditReport, runWorld2DAudit } from "../src/world/audit2d";
 import { formatWorld2DChallengeAuditReport, runWorld2DChallengeAudit } from "../src/world/audit2dChallenge";
 import { formatWorld2DComplexAuditReport, runWorld2DComplexAudit } from "../src/world/audit2dComplex";
+import { createChallengeConfig, runChallengeExperiment } from "../src/world/challenge2d";
 import { formatArbitrationAuditReport, runArbitrationAudit } from "../src/world/auditArbitration";
 import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "../src/world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
@@ -117,6 +118,81 @@ test("2D-challenge audit passes required bottleneck suites and reports reward-on
   assert.match(formatted, /reward-only/);
 });
 
+test("reward-only challenge learning records advantage-based reward signals", () => {
+  const result = runChallengeExperiment(createChallengeConfig(defaultConfig), {
+    seed: 31,
+    trainSeeds: [1],
+    evalSeeds: [101],
+    epochs: 1,
+    learningMode: "rewardOnly"
+  });
+  const trainSteps = result.trace.episodes.flatMap((episode) =>
+    episode.phase === "train" ? episode.steps : []
+  );
+
+  assert.ok(trainSteps.length > 0);
+  assert.ok(trainSteps.every((step) => typeof step.rewardBaseline === "number"));
+  assert.ok(trainSteps.every((step) => typeof step.rewardAdvantage === "number"));
+  assert.ok(trainSteps.some((step) => step.rewardAdvantage !== step.reward));
+  assert.equal(result.trace.config.rewardAdvantageBaselineAlpha, createChallengeConfig(defaultConfig).rewardAdvantageBaselineAlpha);
+});
+
+test("epsilon-greedy exploration makes noop visible during rewardOnly training and stays deterministic", () => {
+  const epsConfig = createChallengeConfig(
+    withConfig({ explorationStrategy: "epsilonGreedy", explorationEpsilon: 0.2 })
+  );
+  const result = runChallengeExperiment(epsConfig, {
+    seed: 41,
+    trainSeeds: [1],
+    evalSeeds: [101],
+    epochs: 1,
+    learningMode: "rewardOnly"
+  });
+  const trainSteps = result.trace.episodes.flatMap((episode) =>
+    episode.phase === "train" ? episode.steps : []
+  );
+
+  // epsilon-greedy does not force a motor on every noop step, so the network's
+  // own noop decisions must now appear in the training trace (the diagnostic
+  // signal that conflict-gated exploration used to mask).
+  assert.ok(trainSteps.some((step) => step.executedAction === "noop"));
+  // exploration still occurs (some steps carry an explorationAction override).
+  assert.ok(trainSteps.some((step) => step.explorationAction !== null));
+  // trace records the strategy that produced it.
+  assert.equal(result.trace.config.explorationStrategy, "epsilonGreedy");
+  assert.equal(result.trace.config.explorationEpsilon, 0.2);
+
+  // determinism: same seed reproduces the stable trace.
+  const replay = runChallengeExperiment(epsConfig, {
+    seed: 41,
+    trainSeeds: [1],
+    evalSeeds: [101],
+    epochs: 1,
+    learningMode: "rewardOnly"
+  });
+  assert.deepEqual(replay.trace.episodes, result.trace.episodes);
+});
+
+test("conflictGated exploration strategy remains available as a toggle", () => {
+  const cgConfig = createChallengeConfig(
+    withConfig({ explorationStrategy: "conflictGated" })
+  );
+  const result = runChallengeExperiment(cgConfig, {
+    seed: 41,
+    trainSeeds: [1],
+    evalSeeds: [101],
+    epochs: 1,
+    learningMode: "rewardOnly"
+  });
+  assert.equal(result.trace.config.explorationStrategy, "conflictGated");
+  const trainSteps = result.trace.episodes.flatMap((episode) =>
+    episode.phase === "train" ? episode.steps : []
+  );
+  // legacy behaviour: a noop decision is always overridden by a forced motor,
+  // so executedAction must never be "noop" during rewardOnly training.
+  assert.ok(trainSteps.every((step) => step.executedAction !== "noop"));
+});
+
 test("2D-challenge pretrained exports preserve learned network snapshots", () => {
   const exports = createChallengePretrainExports(defaultConfig, { outputDir: "exports/test-pretrained" });
   const modes = exports.map((item) => item.mode).sort();
@@ -211,10 +287,15 @@ test("transfer matrix aggregates stress axes and enforces rewardOnly/continued-l
   assert.ok(report.summary.dropout02.rewardOnlyDelta);
   assert.ok(report.summary.dropout03.rewardOnlyDelta);
   assert.ok(report.summary.continuedLearning);
+  assert.ok(report.summary.wrongPrior.postCLWrongDirectionMaxStableWeight);
+  assert.ok(report.summary.wrongPrior.postCLWrongDirectionMaxFastWeight);
   assert.equal(report.summary.continuedLearning.reversals.length, 0);
   assert.ok(report.summary.rewardOnlyMeanRewardDelta.min > 0);
   assert.ok(report.summary.rewardOnlySuccessSeparation.min >= 0);
   assert.ok(report.summary.continuedLearning.separation.min >= 0);
   assert.match(formatted, /Stress axes:/);
+  assert.match(formatted, /fresh=noop/);
+  assert.match(formatted, /wrong-prior postCL max stable/);
+  assert.match(formatted, /wrong-prior postCL dual-lock/);
   assert.match(formatted, /continued-learning/);
 });

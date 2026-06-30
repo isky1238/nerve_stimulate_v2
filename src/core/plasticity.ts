@@ -46,7 +46,7 @@ export function updateEligibility(
 export function applyRewardLearning(
   synapses: Synapse[],
   neuronsById: Map<string, Neuron>,
-  reward: number,
+  rewardSignal: number,
   config: ModelConfig
 ): LearningEvent[] {
   const events: LearningEvent[] = [];
@@ -60,7 +60,7 @@ export function applyRewardLearning(
     const branch = post?.branches.find((candidate) => candidate.id === synapse.postBranchId);
     const plasticityGate = branch?.plasticityGate ?? 1;
     const before = synapse.fastWeight;
-    const delta = config.fastLearningRate * reward * synapse.eligibilityTrace * plasticityGate;
+    const delta = config.fastLearningRate * rewardSignal * synapse.eligibilityTrace * plasticityGate;
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
     refreshSynapseWeight(synapse, config);
 
@@ -161,7 +161,13 @@ export function decayWeights(synapses: Synapse[], config: ModelConfig): Learning
     const beforeFast = synapse.fastWeight;
     const beforeStable = synapse.stableWeight;
     synapse.fastWeight *= config.fastDecay;
-    synapse.stableWeight *= config.stableDecay;
+    // Structural sensory stems (decayProtected) carry the network's only
+    // afferent signal and must not be passively eroded past the post-synaptic
+    // threshold — doing so silently severs the downstream chain (the long-range
+    // rewardOnly noop cliff). Learned stable weights still decay normally.
+    if (!synapse.decayProtected) {
+      synapse.stableWeight *= config.stableDecay;
+    }
     refreshSynapseWeight(synapse, config);
 
     if (beforeFast !== synapse.fastWeight || beforeStable !== synapse.stableWeight) {

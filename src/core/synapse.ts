@@ -32,6 +32,17 @@ export interface Synapse {
   reconnectCooldown: number;
   pruneMark: number;
   stabilityScore: number;
+  /**
+   * Structural hardware stem flag. True for hardwired sensory-input干线
+   * (e.g. sensory→interneuron fixed synapses) that carry the network's
+   * only afferent signal and must NOT be eroded by passive stableDecay —
+   * eroding them past the post-synaptic axon threshold silently severs the
+   * whole downstream motor chain (observed as the long-range rewardOnly
+   * noop cliff around epoch ~200-250). fastWeight decay, learning updates,
+   * and effectiveWeight computation are unchanged; only stableWeight passive
+   * decay is skipped. Learned/plastic synapses stay false.
+   */
+  decayProtected: boolean;
 }
 
 export interface CreateSynapseParams {
@@ -43,6 +54,7 @@ export interface CreateSynapseParams {
   state?: SynapseState;
   fastWeight?: number;
   stableWeight?: number;
+  decayProtected?: boolean;
 }
 
 export interface PropagationEvent {
@@ -73,7 +85,8 @@ export function createSynapse(params: CreateSynapseParams, config: ModelConfig):
     eligibilityTrace: 0,
     reconnectCooldown: 0,
     pruneMark: 0,
-    stabilityScore: 0
+    stabilityScore: 0,
+    decayProtected: params.decayProtected ?? false
   };
 
   refreshSynapseWeight(synapse, config);

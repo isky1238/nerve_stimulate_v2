@@ -1,4 +1,4 @@
-import { ModelConfig } from "../config/newModelConfig";
+import { ModelConfig, withConfig } from "../config/newModelConfig";
 import { LearningNetwork, createOfflineLearningNetwork } from "../core/evaluation";
 import { Neuron, resetNeuronRuntime } from "../core/neuron";
 import { refreshSynapseWeights, Synapse } from "../core/synapse";
@@ -35,7 +35,7 @@ export function loadNetworkFromExport(snapshot: NetworkExport): {
     throw new Error(`Unsupported export version: ${snapshot.version}`);
   }
 
-  const config = snapshot.config;
+  const config = withConfig(snapshot.config);
   const network = createOfflineLearningNetwork(config);
 
   validateStructure(snapshot, network);
@@ -143,6 +143,13 @@ function applySynapseState(target: Synapse[], source: Synapse[]): void {
     synapse.reconnectCooldown = snap.reconnectCooldown;
     synapse.pruneMark = snap.pruneMark;
     synapse.stabilityScore = snap.stabilityScore;
+    // Preserve the structural-stem flag (older snapshots written before this
+    // field default to false; the skeleton rebuilt by createOfflineLearningNetwork
+    // already carries the correct value, so only overwrite when the snapshot
+    // actually records it).
+    if (typeof snap.decayProtected === "boolean") {
+      synapse.decayProtected = snap.decayProtected;
+    }
   }
 }
 

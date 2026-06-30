@@ -64,6 +64,14 @@ export interface TransferMatrixReport {
     wrongPrior: {
       separation: { min: number; mean: number; max: number };
       nonVacuousCells: number;
+      preTrainWrongDirectionStableCount: { min: number; mean: number; max: number };
+      preTrainWrongDirectionMaxStableWeight: { min: number; mean: number; max: number };
+      preTrainWrongDirectionMaxFastWeight: { min: number; mean: number; max: number };
+      preTrainDualLockCells: number;
+      postCLWrongDirectionStableCount: { min: number; mean: number; max: number };
+      postCLWrongDirectionMaxStableWeight: { min: number; mean: number; max: number };
+      postCLWrongDirectionMaxFastWeight: { min: number; mean: number; max: number };
+      postCLDualLockCells: number;
       reversals: string[];
     };
     failedCells: string[];
@@ -241,6 +249,14 @@ function summarize(
   const continuedLearningSeparations: number[] = [];
   const continuedLearningReversals: string[] = [];
   const wrongPriorSeparations: number[] = [];
+  const wrongPriorPreTrainStableCounts: number[] = [];
+  const wrongPriorPreTrainMaxStableWeights: number[] = [];
+  const wrongPriorPreTrainMaxFastWeights: number[] = [];
+  let wrongPriorPreTrainDualLockCells = 0;
+  const wrongPriorPostCLStableCounts: number[] = [];
+  const wrongPriorPostCLMaxStableWeights: number[] = [];
+  const wrongPriorPostCLMaxFastWeights: number[] = [];
+  let wrongPriorPostCLDualLockCells = 0;
   const wrongPriorReversals: string[] = [];
   const failedCells: string[] = [];
   let cellsAllRequiredPass = 0;
@@ -304,6 +320,18 @@ function summarize(
     if (wrongPrior) {
       const separation = Number(wrongPrior.metrics.separation);
       wrongPriorSeparations.push(separation);
+      wrongPriorPreTrainStableCounts.push(Number(wrongPrior.metrics.wrongDirectionStableCount));
+      wrongPriorPreTrainMaxStableWeights.push(Number(wrongPrior.metrics.wrongDirectionMaxStableWeight));
+      wrongPriorPreTrainMaxFastWeights.push(Number(wrongPrior.metrics.wrongDirectionMaxFastWeight));
+      if (wrongPrior.metrics.dualLockConfirmed === true) {
+        wrongPriorPreTrainDualLockCells += 1;
+      }
+      wrongPriorPostCLStableCounts.push(Number(wrongPrior.metrics.postCLWrongDirectionStableCount));
+      wrongPriorPostCLMaxStableWeights.push(Number(wrongPrior.metrics.postCLWrongDirectionMaxStableWeight));
+      wrongPriorPostCLMaxFastWeights.push(Number(wrongPrior.metrics.postCLWrongDirectionMaxFastWeight));
+      if (wrongPrior.metrics.postCLDualLockConfirmed === true) {
+        wrongPriorPostCLDualLockCells += 1;
+      }
       if (separation >= 0) {
         wrongPriorReversals.push(result.cell.label);
       }
@@ -351,6 +379,14 @@ function summarize(
       wrongPrior: {
         separation: stats(wrongPriorSeparations),
         nonVacuousCells: wrongPriorSeparations.filter((value) => value < 0).length,
+        preTrainWrongDirectionStableCount: stats(wrongPriorPreTrainStableCounts),
+        preTrainWrongDirectionMaxStableWeight: stats(wrongPriorPreTrainMaxStableWeights),
+        preTrainWrongDirectionMaxFastWeight: stats(wrongPriorPreTrainMaxFastWeights),
+        preTrainDualLockCells: wrongPriorPreTrainDualLockCells,
+        postCLWrongDirectionStableCount: stats(wrongPriorPostCLStableCounts),
+        postCLWrongDirectionMaxStableWeight: stats(wrongPriorPostCLMaxStableWeights),
+        postCLWrongDirectionMaxFastWeight: stats(wrongPriorPostCLMaxFastWeights),
+        postCLDualLockCells: wrongPriorPostCLDualLockCells,
         reversals: wrongPriorReversals
       },
       failedCells
@@ -421,7 +457,7 @@ export function formatTransferMatrixReport(report: TransferMatrixReport): string
   lines.push("");
   lines.push("Stress axes:");
   const rewSuccess = report.summary.rewardOnlySuccessSeparation;
-  lines.push(`  rewardOnly success sep (frozen):  min=${rewSuccess.min.toFixed(3)} mean=${rewSuccess.mean.toFixed(3)} max=${rewSuccess.max.toFixed(3)}`);
+  lines.push(`  rewardOnly success sep (frozen; fresh=noop): min=${rewSuccess.min.toFixed(3)} mean=${rewSuccess.mean.toFixed(3)} max=${rewSuccess.max.toFixed(3)}`);
   const d02sup = report.summary.dropout02.supervisedSeparation;
   const d02rew = report.summary.dropout02.rewardOnlyDelta;
   lines.push(`  dropout 0.2 supervised sep:       min=${d02sup.min.toFixed(3)} mean=${d02sup.mean.toFixed(3)} max=${d02sup.max.toFixed(3)}`);
@@ -436,6 +472,20 @@ export function formatTransferMatrixReport(report: TransferMatrixReport): string
   const wp = report.summary.wrongPrior.separation;
   lines.push(`  wrong-prior sep:                  min=${wp.min.toFixed(3)} mean=${wp.mean.toFixed(3)} max=${wp.max.toFixed(3)}`);
   lines.push(`  wrong-prior non-vacuous cells:    ${report.summary.wrongPrior.nonVacuousCells}/${report.summary.cellsRun} (separation<0)`);
+  const wpStableCount = report.summary.wrongPrior.postCLWrongDirectionStableCount;
+  const wpStableWeight = report.summary.wrongPrior.postCLWrongDirectionMaxStableWeight;
+  const wpFastWeight = report.summary.wrongPrior.postCLWrongDirectionMaxFastWeight;
+  const wpPreStableCount = report.summary.wrongPrior.preTrainWrongDirectionStableCount;
+  const wpPreStableWeight = report.summary.wrongPrior.preTrainWrongDirectionMaxStableWeight;
+  const wpPreFastWeight = report.summary.wrongPrior.preTrainWrongDirectionMaxFastWeight;
+  lines.push(`  wrong-prior preTrain stable count: min=${wpPreStableCount.min.toFixed(3)} mean=${wpPreStableCount.mean.toFixed(3)} max=${wpPreStableCount.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain max stable:   min=${wpPreStableWeight.min.toFixed(3)} mean=${wpPreStableWeight.mean.toFixed(3)} max=${wpPreStableWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain max fast:     min=${wpPreFastWeight.min.toFixed(3)} mean=${wpPreFastWeight.mean.toFixed(3)} max=${wpPreFastWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain dual-lock:    ${report.summary.wrongPrior.preTrainDualLockCells}/${report.summary.cellsRun}`);
+  lines.push(`  wrong-prior postCL stable count:  min=${wpStableCount.min.toFixed(3)} mean=${wpStableCount.mean.toFixed(3)} max=${wpStableCount.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL max stable:    min=${wpStableWeight.min.toFixed(3)} mean=${wpStableWeight.mean.toFixed(3)} max=${wpStableWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL max fast:      min=${wpFastWeight.min.toFixed(3)} mean=${wpFastWeight.mean.toFixed(3)} max=${wpFastWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL dual-lock:     ${report.summary.wrongPrior.postCLDualLockCells}/${report.summary.cellsRun}`);
   lines.push(`  wrong-prior reversals:            ${report.summary.wrongPrior.reversals.length === 0 ? "0" : report.summary.wrongPrior.reversals.join(", ")}`);
 
   return lines.join("\n");
@@ -500,6 +550,14 @@ export interface MultiMatrixReport {
     cellsRun: number;
     nonVacuousCells: number;
     separation: { min: number; mean: number; max: number };
+    preTrainWrongDirectionStableCount: { min: number; mean: number; max: number };
+    preTrainWrongDirectionMaxStableWeight: { min: number; mean: number; max: number };
+    preTrainWrongDirectionMaxFastWeight: { min: number; mean: number; max: number };
+    preTrainDualLockCells: number;
+    postCLWrongDirectionStableCount: { min: number; mean: number; max: number };
+    postCLWrongDirectionMaxStableWeight: { min: number; mean: number; max: number };
+    postCLWrongDirectionMaxFastWeight: { min: number; mean: number; max: number };
+    postCLDualLockCells: number;
     reversals: string[];
   };
   continuedLearningAggregate: {
@@ -532,6 +590,14 @@ export async function runTransferAuditMatrixMulti(
   );
 
   const wrongPriorSeparations: number[] = [];
+  const wrongPriorPreTrainStableCounts: number[] = [];
+  const wrongPriorPreTrainMaxStableWeights: number[] = [];
+  const wrongPriorPreTrainMaxFastWeights: number[] = [];
+  let wrongPriorPreTrainDualLockCells = 0;
+  const wrongPriorPostCLStableCounts: number[] = [];
+  const wrongPriorPostCLMaxStableWeights: number[] = [];
+  const wrongPriorPostCLMaxFastWeights: number[] = [];
+  let wrongPriorPostCLDualLockCells = 0;
   const wrongPriorReversals: string[] = [];
   let wrongPriorNonVacuous = 0;
   const continuedLearningSeparations: number[] = [];
@@ -551,6 +617,18 @@ export async function runTransferAuditMatrixMulti(
       if (wrongPrior) {
         const separation = Number(wrongPrior.metrics.separation);
         wrongPriorSeparations.push(separation);
+        wrongPriorPreTrainStableCounts.push(Number(wrongPrior.metrics.wrongDirectionStableCount));
+        wrongPriorPreTrainMaxStableWeights.push(Number(wrongPrior.metrics.wrongDirectionMaxStableWeight));
+        wrongPriorPreTrainMaxFastWeights.push(Number(wrongPrior.metrics.wrongDirectionMaxFastWeight));
+        if (wrongPrior.metrics.dualLockConfirmed === true) {
+          wrongPriorPreTrainDualLockCells += 1;
+        }
+        wrongPriorPostCLStableCounts.push(Number(wrongPrior.metrics.postCLWrongDirectionStableCount));
+        wrongPriorPostCLMaxStableWeights.push(Number(wrongPrior.metrics.postCLWrongDirectionMaxStableWeight));
+        wrongPriorPostCLMaxFastWeights.push(Number(wrongPrior.metrics.postCLWrongDirectionMaxFastWeight));
+        if (wrongPrior.metrics.postCLDualLockConfirmed === true) {
+          wrongPriorPostCLDualLockCells += 1;
+        }
         if (separation < 0) {
           wrongPriorNonVacuous += 1;
         } else {
@@ -584,6 +662,14 @@ export async function runTransferAuditMatrixMulti(
       cellsRun: wrongPriorSeparations.length,
       nonVacuousCells: wrongPriorNonVacuous,
       separation: stats(wrongPriorSeparations),
+      preTrainWrongDirectionStableCount: stats(wrongPriorPreTrainStableCounts),
+      preTrainWrongDirectionMaxStableWeight: stats(wrongPriorPreTrainMaxStableWeights),
+      preTrainWrongDirectionMaxFastWeight: stats(wrongPriorPreTrainMaxFastWeights),
+      preTrainDualLockCells: wrongPriorPreTrainDualLockCells,
+      postCLWrongDirectionStableCount: stats(wrongPriorPostCLStableCounts),
+      postCLWrongDirectionMaxStableWeight: stats(wrongPriorPostCLMaxStableWeights),
+      postCLWrongDirectionMaxFastWeight: stats(wrongPriorPostCLMaxFastWeights),
+      postCLDualLockCells: wrongPriorPostCLDualLockCells,
       reversals: wrongPriorReversals
     },
     continuedLearningAggregate: {
@@ -604,10 +690,13 @@ export function formatMultiMatrixReport(report: MultiMatrixReport): string {
 
   report.matrices.forEach((matrix, index) => {
     const wp = matrix.summary.wrongPrior.separation;
+    const wpStableCount = matrix.summary.wrongPrior.postCLWrongDirectionStableCount;
+    const wpStableWeight = matrix.summary.wrongPrior.postCLWrongDirectionMaxStableWeight;
     const cont = matrix.summary.continuedLearning.separation;
     lines.push(`Matrix ${index}: pretrain=[${matrix.grid.pretrainSeeds.join(",")}] requiredPassed=${matrix.requiredPassed}`);
     lines.push(`  cells: ${matrix.summary.cellsRun}, all-required-pass: ${matrix.summary.cellsAllRequiredPass}/${matrix.summary.cellsRun}`);
     lines.push(`  wrong-prior sep:    min=${wp.min.toFixed(3)} mean=${wp.mean.toFixed(3)} max=${wp.max.toFixed(3)} non-vacuous=${matrix.summary.wrongPrior.nonVacuousCells}/${matrix.summary.cellsRun}`);
+    lines.push(`  wrong-prior postCL: stableCount min=${wpStableCount.min.toFixed(3)} mean=${wpStableCount.mean.toFixed(3)} max=${wpStableCount.max.toFixed(3)} maxStable mean=${wpStableWeight.mean.toFixed(3)} dualLock=${matrix.summary.wrongPrior.postCLDualLockCells}/${matrix.summary.cellsRun}`);
     lines.push(`  continued-learning sep: min=${cont.min.toFixed(3)} mean=${cont.mean.toFixed(3)} max=${cont.max.toFixed(3)}`);
     if (matrix.summary.failedCells.length > 0) {
       lines.push(`  failed cells: ${matrix.summary.failedCells.join(", ")}`);
@@ -620,6 +709,14 @@ export function formatMultiMatrixReport(report: MultiMatrixReport): string {
   lines.push(`  wrong-prior cells:           ${wpAgg.cellsRun}`);
   lines.push(`  wrong-prior non-vacuous:     ${wpAgg.nonVacuousCells}/${wpAgg.cellsRun} (separation<0)`);
   lines.push(`  wrong-prior sep:             min=${wpAgg.separation.min.toFixed(3)} mean=${wpAgg.separation.mean.toFixed(3)} max=${wpAgg.separation.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain stable count: min=${wpAgg.preTrainWrongDirectionStableCount.min.toFixed(3)} mean=${wpAgg.preTrainWrongDirectionStableCount.mean.toFixed(3)} max=${wpAgg.preTrainWrongDirectionStableCount.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain max stable:   min=${wpAgg.preTrainWrongDirectionMaxStableWeight.min.toFixed(3)} mean=${wpAgg.preTrainWrongDirectionMaxStableWeight.mean.toFixed(3)} max=${wpAgg.preTrainWrongDirectionMaxStableWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain max fast:     min=${wpAgg.preTrainWrongDirectionMaxFastWeight.min.toFixed(3)} mean=${wpAgg.preTrainWrongDirectionMaxFastWeight.mean.toFixed(3)} max=${wpAgg.preTrainWrongDirectionMaxFastWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior preTrain dual-lock:    ${wpAgg.preTrainDualLockCells}/${wpAgg.cellsRun}`);
+  lines.push(`  wrong-prior postCL stable count: min=${wpAgg.postCLWrongDirectionStableCount.min.toFixed(3)} mean=${wpAgg.postCLWrongDirectionStableCount.mean.toFixed(3)} max=${wpAgg.postCLWrongDirectionStableCount.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL max stable:   min=${wpAgg.postCLWrongDirectionMaxStableWeight.min.toFixed(3)} mean=${wpAgg.postCLWrongDirectionMaxStableWeight.mean.toFixed(3)} max=${wpAgg.postCLWrongDirectionMaxStableWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL max fast:     min=${wpAgg.postCLWrongDirectionMaxFastWeight.min.toFixed(3)} mean=${wpAgg.postCLWrongDirectionMaxFastWeight.mean.toFixed(3)} max=${wpAgg.postCLWrongDirectionMaxFastWeight.max.toFixed(3)}`);
+  lines.push(`  wrong-prior postCL dual-lock:    ${wpAgg.postCLDualLockCells}/${wpAgg.cellsRun}`);
   lines.push(`  wrong-prior reversals:       ${wpAgg.reversals.length === 0 ? "0" : wpAgg.reversals.join(", ")}`);
   const contAgg = report.continuedLearningAggregate;
   lines.push(`  continued-learning cells:    ${contAgg.cellsRun}`);

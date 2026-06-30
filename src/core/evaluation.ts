@@ -400,12 +400,18 @@ export function createOfflineLearningNetwork(config: ModelConfig): LearningNetwo
   const synapses: Synapse[] = [];
 
   for (let index = 0; index < sensors.length; index += 1) {
-    addFixedSynapse(synapses, byId, sensors[index].id, inters[index].id, inters[index].branches[0].id, 0, 1.1, config);
+    // Sensory→interneuron stems are the network's only afferent input干线.
+    // Their stable weight (1.1) sits just above the inter axon threshold (1.0);
+    // passive stableDecay would erode that 0.1 margin over ~200-250 epochs and
+    // silently sever the entire downstream motor chain (the rewardOnly noop
+    // cliff). Mark them decayProtected so stableWeight is preserved; the
+    // plastic inter→motor synapses below remain fully decayable.
+    addFixedSynapse(synapses, byId, sensors[index].id, inters[index].id, inters[index].branches[0].id, 0, 1.1, config, true);
   }
 
   for (const inter of inters) {
     for (const motor of motors) {
-      addFixedSynapse(synapses, byId, inter.id, motor.id, motor.branches[0].id, 0.35, 0, config);
+      addFixedSynapse(synapses, byId, inter.id, motor.id, motor.branches[0].id, 0.35, 0, config, false);
     }
   }
 
@@ -425,7 +431,8 @@ function addFixedSynapse(
   postBranchId: string,
   fastWeight: number,
   stableWeight: number,
-  config: ModelConfig
+  config: ModelConfig,
+  decayProtected = false
 ): void {
   const synapse = createSynapse(
     {
@@ -436,7 +443,8 @@ function addFixedSynapse(
       effectSign: 1,
       state: "active",
       fastWeight,
-      stableWeight
+      stableWeight,
+      decayProtected
     },
     config
   );

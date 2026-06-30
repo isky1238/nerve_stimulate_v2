@@ -71,6 +71,8 @@ export interface ChallengeTraceStep {
   explorationAction: WorldAction | null;
   executedAction: WorldAction;
   reward: number;
+  rewardBaseline: number;
+  rewardAdvantage: number;
   distanceDelta: number;
   after: WorldState;
   terminalReason: ChallengeTerminalReason;
@@ -105,6 +107,9 @@ export interface ChallengeExperimentTrace {
     learningMode: ChallengeLearningMode;
     observationDropout: number;
     reverseMapping: boolean;
+    rewardAdvantageBaselineAlpha: number;
+    explorationStrategy: "conflictGated" | "epsilonGreedy";
+    explorationEpsilon: number;
   };
   episodes: ChallengeEpisodeTrace[];
 }
@@ -135,6 +140,17 @@ export interface ChallengeExperimentOptions {
   evaluationScenarios?: ChallengeScenario[];
   initialNetwork?: LearningNetwork;
   reverseMapping?: boolean;
+  /**
+   * Per-epoch diagnostic hook. Called at the end of each training epoch with the
+   * current network and the training episodes run during that epoch. Used by
+   * collapse diagnostics to sample bilateral fastWeight symmetry and per-epoch
+   * conflict/noop rates. Undefined by default — does not affect existing runs.
+   */
+  epochProbe?: (
+    epoch: number,
+    network: LearningNetwork,
+    epochEpisodes: ChallengeEpisodeTrace[]
+  ) => void;
 }
 
 interface NetworkStepResult {
@@ -152,6 +168,10 @@ interface RewardResult {
   terminal: boolean;
   success: boolean;
   distanceDelta: number;
+}
+
+export interface RewardAdvantageState {
+  baseline: number;
 }
 
 export const CHALLENGE_WIDTH = 7;
@@ -193,9 +213,11 @@ export function runChallengeExperiment(
   let supervisedUpdateCount = 0;
   let captureUpdateCount = 0;
   let decayUpdateCount = 0;
+  const rewardAdvantageState: RewardAdvantageState = { baseline: 0 };
 
   for (let epoch = 0; epoch < options.epochs; epoch += 1) {
     const epochScenarios = shuffleScenarios(trainingScenarios, options.seed + epoch);
+    const epochEpisodes: ChallengeEpisodeTrace[] = [];
 
     for (const scenario of epochScenarios) {
       const episode = runChallengeEpisode(network, scenario, config, {
@@ -204,7 +226,8 @@ export function runChallengeExperiment(
         learningEnabled: options.learningMode !== "frozen",
         seed: options.seed + epoch * 1000 + scenario.seed,
         observationDropout,
-        reverseMapping
+        reverseMapping,
+        rewardAdvantageState
       });
       const counts = countLearningEvents(episode);
       rewardUpdateCount += counts.rewardUpdateCount;
@@ -212,6 +235,11 @@ export function runChallengeExperiment(
       captureUpdateCount += counts.captureUpdateCount;
       decayUpdateCount += counts.decayUpdateCount;
       episodes.push(episode);
+      epochEpisodes.push(episode);
+    }
+
+    if (options.epochProbe) {
+      options.epochProbe(epoch, network, epochEpisodes);
     }
   }
 
@@ -250,7 +278,10 @@ export function runChallengeExperiment(
         epochs: options.epochs,
         learningMode: options.learningMode,
         observationDropout,
-        reverseMapping
+        reverseMapping,
+        rewardAdvantageBaselineAlpha: config.rewardAdvantageBaselineAlpha,
+        explorationStrategy: config.explorationStrategy,
+        explorationEpsilon: config.explorationEpsilon
       },
       episodes
     },
@@ -278,6 +309,7 @@ export function runChallengeEpisode(
     seed: number;
     observationDropout: number;
     reverseMapping: boolean;
+    rewardAdvantageState?: RewardAdvantageState;
   }
 ): ChallengeEpisodeTrace {
   const rng = new SeededRandom(options.seed);
@@ -303,13 +335,19 @@ export function runChallengeEpisode(
     });
     const after = stepChallengeWorld(state, networkStep.executedAction);
     const reward = scoreChallengeStep(state, after, networkStep.executedAction);
+    const rewardBaseline = options.rewardAdvantageState?.baseline ?? 0;
+    const rewardAdvantage =
+      options.learningEnabled && options.learningMode === "rewardOnly"
+        ? reward.reward - rewardBaseline
+        : reward.reward;
     let rewardUpdates = 0;
     let captureUpdates = 0;
     let decayUpdates = 0;
 
     if (options.learningEnabled && options.learningMode === "rewardOnly") {
       const neuronsById = indexNeurons(network.neurons);
-      rewardUpdates = applyRewardLearning(network.synapses, neuronsById, reward.reward, config).length;
+      rewardUpdates = applyRewardLearning(network.synapses, neuronsById, rewardAdvantage, config).length;
+      updateRewardAdvantageBaseline(options.rewardAdvantageState, reward.reward, config);
       captureUpdates = captureStableWeights(network.synapses, config).length;
       decayUpdates = decayWeights(network.synapses, config).length;
     } else if (options.learningEnabled && options.learningMode === "supervised") {
@@ -327,6 +365,8 @@ export function runChallengeEpisode(
       explorationAction: networkStep.explorationAction,
       executedAction: networkStep.executedAction,
       reward: reward.reward,
+      rewardBaseline,
+      rewardAdvantage,
       distanceDelta: reward.distanceDelta,
       after,
       terminalReason: reward.terminalReason,
@@ -480,7 +520,7 @@ function runChallengeNetworkStep(
 
   const rawActiveMotors = activeMotorIds(network);
   const networkDecision = arbitrateMotorAction(rawActiveMotors);
-  const explorationAction = selectExplorationAction(networkDecision.action, options);
+  const explorationAction = selectExplorationAction(networkDecision.action, options, config);
   const activeMotors = explorationAction
     ? forceExplorationMotor(network, explorationAction)
     : rawActiveMotors;
@@ -515,12 +555,25 @@ function runChallengeNetworkStep(
 
 export function selectExplorationAction(
   action: WorldAction,
-  options: { learningMode: ChallengeLearningMode; learningEnabled: boolean; phase: ChallengeEpisodePhase; rng: SeededRandom }
+  options: { learningMode: ChallengeLearningMode; learningEnabled: boolean; phase: ChallengeEpisodePhase; rng: SeededRandom },
+  config: ModelConfig
 ): WorldAction | null {
   if (!options.learningEnabled || options.learningMode !== "rewardOnly" || options.phase !== "train") {
     return null;
   }
 
+  if (config.explorationStrategy === "epsilonGreedy") {
+    // ε-greedy: with probability ε override with a random motor action; otherwise
+    // follow the network's own decision verbatim. Letting noop propagate (instead
+    // of forcing a motor on every noop/conflict) makes the learner's inaction
+    // visible and stops conflict-gated forcing from masking noop during training.
+    if (options.rng.next() < config.explorationEpsilon) {
+      return options.rng.nextInt(2) === 0 ? "left" : "right";
+    }
+    return null;
+  }
+
+  // Legacy "conflictGated": explore only when the network failed to commit.
   if (action === "left" || action === "right") {
     return null;
   }
@@ -543,6 +596,19 @@ export function forceExplorationMotor(network: LearningNetwork, action: WorldAct
   }
 
   return activeMotorIds(network);
+}
+
+export function updateRewardAdvantageBaseline(
+  state: RewardAdvantageState | undefined,
+  reward: number,
+  config: ModelConfig
+): void {
+  if (!state) {
+    return;
+  }
+
+  state.baseline =
+    state.baseline * (1 - config.rewardAdvantageBaselineAlpha) + reward * config.rewardAdvantageBaselineAlpha;
 }
 
 export function scoreChallengeStep(before: WorldState, after: WorldState, action: WorldAction): RewardResult {

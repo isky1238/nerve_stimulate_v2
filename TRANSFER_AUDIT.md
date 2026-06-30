@@ -72,6 +72,8 @@ neuron/branch 的部分未导出字段（`overactiveTime`、branch `dormantTime`
   它确认 loader 保真 + 预训练知识没丢，但不证明迁移强度。主要迁移证据是 rewardOnly。
 - frozen-pretrained vs frozen-fresh separation (rewardOnly)：`pretrained.meanReward > fresh.meanReward`、
   `fresh.noopRate === 1`、**`pretrained.successRate > 0`**（避免零成功只是均值稍高的假阳性）。
+  这个门仍应解读为"rewardOnly 预训练产生了非零可加载行为"，不是强迁移证据：fresh-frozen
+  是结构性 noop baseline，rewardOnly separation 主要是非零 vs 零。
 - transfer eval seed isolation：迁移 eval seeds `[201..205]` 与预训练 train seeds `[1..5]`、
   eval seeds `[101..105]` 无重叠。
 - transfer conflict boundary preservation：预训练网络在 `conflictChallengeScenario` 上首步
@@ -84,7 +86,10 @@ neuron/branch 的部分未导出字段（`overactiveTime`、branch `dormantTime`
 wrong-prior diagnostic（`auditWrongPriorDiagnostic`）在 suite 内部用 `reverseMapping=true` 重新预训练一份 supervised
 快照（food-left→right, toxin-left→right 等），经过磁盘 round-trip 加载，再用 1 epoch 正确映射继续训练，
 与 fresh + 1 epoch 对比。`passed=separation<0`：语义是"测到预期退化"——wrong-prior 预训练应让网络必须先
-unlearn 错误突触，performance 低于 fresh。这是 continued-learning gate 在当前任务复杂度下**真正可失败**的路径。
+unlearn 错误突触，performance 低于 fresh。但这不是自动的健康信号：若 separation 在矩阵中统一为 `-1.000`，
+说明 fresh+1ep 已饱和而 wrong-prior+1ep 尚未恢复，暴露的是 **1 epoch 压力预算太短**。必须同时看
+`postCLWrongDirectionMaxFastWeight`、`postCLWrongDirectionMaxStableWeight`、`postCLDualLockConfirmed`
+以及 2/3/5/10 epoch 恢复曲线。
 
 ## 矩阵聚合门槛（`npm run audit:transfer:matrix`）
 
@@ -107,10 +112,12 @@ separation<0 表示 wrong-prior hurts（gate 真正可失败）。
 - rewardOnly success separation (frozen)
 - dropout 0.2/0.3 supervised separation 与 rewardOnly delta
 - continued-learning separation 与 reversals 计数
-- wrong-prior separation、non-vacuous cells（separation<0 的格子数）与 reversals 计数
+- wrong-prior separation、non-vacuous cells（separation<0 的格子数）、postCL wrong-direction stable/fast 权重、
+  postCL dual-lock cells 与 reversals 计数
 
 wrong-prior axis 当前是 observational，不 gate。目标是验证 non-vacuity（跨格 separation<0 稳定成立）。
-若多轮矩阵稳定 separation<0，可升级为 gate（`wrongPriorSeparation.max < 0`）。
+若多轮矩阵只是稳定 `separation=-1.000` 且 postCL wrong-direction fast/stable 权重仍高，不能升级为"健康 gate"；
+应记录为 unlearning 失败证据。只有出现可测的 postCL 错误权重下降/部分恢复，才考虑升级。
 
 ## 已知边界
 
@@ -122,21 +129,23 @@ wrong-prior axis 当前是 observational，不 gate。目标是验证 non-vacuit
 6. **每个 suite 独立重新 load**：实验就地 mutate network，共享会导致 suite 间互相污染。
 7. **磁盘 round-trip 而非内存 round-trip**：Suite 1 必须经过 `writeNetworkExport → readNetworkExport → loadNetworkFromExport` 真实文件路径。内存 `JSON.parse(JSON.stringify())` 只测序列化形状，测不到磁盘读写。
 8. **dropout delta 不 gate 是刻意的**：用户明确"开始看"。若未来 dropout 0.3 rewardOnly delta min 翻负，应升级为 gate；当前保持 observational。
-9. **continued-learning gate 是强声明**：`min >= 0` 意味着"预训练永不吃亏，即便给 fresh 等量继续训练预算"。当前 15 格支持此声明；若未来某格 fresh 追上，gate 会失败，这是设计意图。
-10. **rewardOnly success separation gate 在 frozen 下与 suite 3 冗余**：frozen 下 fresh 恒 noop（successRate=0），suite 3 已要求 `pretrained.successRate > 0`。此 gate 在 continued-learning 矩阵中才独立起作用，但写在 frozen 矩阵里是冗余防御——若未来 fresh-frozen 不再恒 noop（例如初始权重改了），此 gate 会独立 catch。
-11. **dropout maxSteps=4 是刻意的，已让 axis 非空真**：12 步预算下 frozen 网络只需 2-3 可见步即成功，dropout 0.3 期望可见步 ~8.4，无影响——15 格 dropout delta 与 frozen baseline 完全相同。4 步预算下 dropout 0.3 期望可见步 ~2.8，产生真实退化：`dropout 0.2 rewardOnly delta min=0.725 mean=0.964`，`dropout 0.3 rewardOnly delta min=0.670 mean=0.947`，梯度可见。若 maxSteps=4 下 dropout delta 跨多轮矩阵稳定不翻负，可考虑升级为 gate。
+9. **continued-learning gate 目前退化为"预训练不退化"**：`min >= 0` 意味着"预训练没有比 fresh 更差"。当前 15 格 separation 恒 0、reversal=0，不能解释为正向 head-start。
+10. **rewardOnly success separation 被 fresh-frozen=0 抬高**：frozen 下 fresh 恒 noop（successRate=0），suite 3 已要求 `pretrained.successRate > 0`。因此 rewardOnly frozen separation 主要测 loader 保真 + rewardOnly 非零，不是强迁移证据。
+11. **dropout maxSteps=4 是刻意的，已让 axis 非空真**：12 步预算下 frozen 网络只需 2-3 可见步即成功，dropout 0.3 期望可见步 ~8.4，无影响——15 格 dropout delta 与 frozen baseline 完全相同。4 步预算下 dropout 0.3 期望可见步 ~2.8，产生真实退化。advantage 更新后当前矩阵为：`dropout 0.2 rewardOnly delta min=0.445 mean=0.529`，`dropout 0.3 rewardOnly delta min=0.345 mean=0.502`，梯度可见但低于旧 raw-reward 基线。若 maxSteps=4 下 dropout delta 跨多轮矩阵稳定不翻负，可考虑升级为 gate。
 12. **continued-learning 1 epoch + 1 trainSeed 是刻意的，但不足以让 gate 非空真**：5 epoch on `[1..5]` 让 fresh 饱和到 successRate=1.0，separation=0.000 永真。收紧到 1 epoch on `[1]`（4 episodes，~8-12 updates/synapse vs ~9 needed for threshold）后，fresh 仍在 15 格全部饱和——任务（4 patterns / 8 synapses / lr 0.08）过于平凡地可学。**此 gate 的价值是捕获 reversal（pretrained 在继续训练下退化，separation < 0），不是测量正向 head-start**。要把 separation 推到正数，需要 wrong-prior（pretrained 必须先 unlearn）或扩展任务复杂度——前者已在 wrong-prior diagnostic 中实现（见 boundary 13），后者 out of scope。当前 15 格 `continued-learning sep: min=0.000 mean=0.000 max=0.000`，reversals=0，gate 通过的含义是"预训练不退化"，不是"预训练有正向 head-start"。
 13. **wrong-prior 仅对 supervised 有意义**：rewardOnly 不读 `expectedAction`（仅 reward-driven），`reverseMapping` 对 rewardOnly 是 no-op。本阶段 wrong-prior diagnostic 只测 supervised pretrained。
-14. **wrong-prior `passed=separation<0` 是非空真信号，不是错误**：与其他 diagnostic 的 `passed` 语义不同——这里 `passed=true` 意味"测到了预期退化"，`passed=false` 意味"wrong-prior 被 1 epoch 完全 unlearn，任务太平凡"。报告读者需注意此语义反转。
+14. **wrong-prior `passed=separation<0` 只是"有伤害"信号**：与其他 diagnostic 的 `passed` 语义不同——这里 `passed=true` 意味"测到了预期退化"。但 `-1.000` uniform 现在应读成 **1 epoch 压力预算失败**，不是健康非空真，也不是系统无法 unlearn。矩阵 summary 必须打印 postCL wrong-direction fast/stable 权重与 dual-lock。
 15. **wrong-prior 的磁盘 round-trip 是 suite 内联的**：不像主 supervised/rewardOnly pretrain 在 `runTransferAudit` 顶部统一做，wrong-prior pretrain 在 suite 内部做。这是为了让主 pretrain 流程不受 wrong-prior 影响，保持现有 suite 行为不变。代价是每个 cell 多一次 pretrain（~40 epoch supervised），矩阵总耗时增加约 1/3。
-16. **wrong-prior 仍受任务复杂度限制**：若 1 epoch continued-learning 足以把 wrong-prior fastWeight 从 1.0 压到 threshold 以下（错误 motor 不再激活），separation 趋 0。supervised 的 -lr*0.7 vs +lr 不对称（衰减比增强慢 30%），wrong-prior 应该能产生信号，但需矩阵数据验证。若跨格 separation 仍为 0，则任务复杂度限制确认触及天花板，下一阶段需任务复杂度扩展（Level 4）。
+16. **wrong-prior epoch curve 已把"卡死 vs 慢恢复"分开**：15-cell 曲线（pretrain seeds 101-105 × eval sets 201/301/401，continued-learning epochs 0/1/2/3/5/10）显示：0ep wrongFast≈1.959/wrongStable≈2.000；1ep preSR=0.000、freshSR=1.000、sep=-1.000、wrongFast≈1.066、wrongStable≈0.055；2ep preSR≈0.850、sep≈-0.150、wrongFast≈0.799；3ep preSR=1.000、sep=0.000、wrongFast≈0.529；10ep wrongFast≈0 且 SR=1.000。结论：supervised stable depotentiation 很快，非 stable dual-lock；1ep 失败主要是 wrong-direction fast path 尚未压下；2ep 部分恢复，3ep 恢复到 fresh-level。1ep gate 应继续作为压力诊断，但不能说系统无法 unlearn。
+
+17. **rewardOnly credit assignment 是结构性未解问题**：当前 rewardOnly 已从 raw reward 改为单边 Hebbian × advantage(`reward - runningBaseline`) 更新，fastWeight 下限仍钳 0、无符号翻转；无 target 信号时仍没有非 target motor 压制；`applyRewardLearning` 不做 stableWeight depotentiation；探索只在 noop/conflict 时触发。advantage 更新打破了 complex Family A 的旧 conflict 表型，但 2D-challenge rewardOnly 仍 SR=0.5 且 noopRate 高，multi-object 仍 SR=0.5。不能把 rewardOnly 读成已解决。
 
 ## 结论表述
 
 可以说：
 
-> 当前 DG-SNN V2 在 15 格受控迁移矩阵下，预训练快照对 held-out eval 场景表现出稳定、可测量的初始优势；rewardOnly 存在跨种子波动但无失败格、无反转；dropout stress axis 在 maxSteps=4 收紧后产生真实退化梯度（0.2 → 0.3 delta 下降）；continued-learning gate 在 1 epoch + 1 trainSeed 收紧后仍受任务复杂度限制，separation 跨格为 0，gate 的含义是"预训练不退化"而非"正向 head-start"；wrong-prior diagnostic 引入 reverseMapping 预训练 + 正确映射继续训练，若跨格 separation<0，则 continued-learning gate 真正可失败——这是 Level 3 受控迁移证据中首次拥有可失败的 unlearning 测试。这是 Level 3 受控迁移证据。
+> 当前 DG-SNN V2 的 L0-L3 受控审计通过；但若干通过项是 vacuous 或被 fresh-frozen=0 抬高。transfer matrix 仍可作为 loader 保真、边界保持、rewardOnly 非零行为和无反转回归测试；continued-learning gate 当前只支持"预训练不退化"，不支持正向 head-start；rewardOnly separation 主要是非零 vs 结构性零 baseline。advantage 更新改善了部分 rewardOnly 表型，但不构成强迁移证据。wrong-prior 是当前唯一真正可失败的 unlearning 压力诊断；uniform `-1.000` 表示 1-epoch 预算失败，而 epoch curve 已显示 2ep 部分恢复、3ep 恢复，不能解读为 stable dual-lock 或无法 unlearn。
 
 不要说：
 
-> 已经证明真实环境迁移稳定成立；或 dropout 下迁移优势保持。
+> 已经证明真实环境迁移稳定成立；rewardOnly credit assignment 已解决；wrong-prior `-1.000` 是健康非空真或系统无法 unlearn；或 dropout 下迁移优势保持。

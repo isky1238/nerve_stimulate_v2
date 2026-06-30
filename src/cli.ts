@@ -9,6 +9,7 @@ import { createNetworkExport, writeNetworkExport } from "./export/networkExport"
 import { formatWorld2DAuditReport, runWorld2DAudit } from "./world/audit2d";
 import { formatWorld2DChallengeAuditReport, runWorld2DChallengeAudit } from "./world/audit2dChallenge";
 import { formatWorld2DComplexAuditReport, runWorld2DComplexAudit } from "./world/audit2dComplex";
+import { runRewardOnlyChallengeCollapseAudit, runRewardOnlyCollapseAudit } from "./world/auditRewardOnlyCollapse";
 import { formatArbitrationAuditReport, runArbitrationAudit } from "./world/auditArbitration";
 import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "./world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "./world/transferAudit";
@@ -92,8 +93,18 @@ function main(): void {
     return;
   }
 
+  if (command === "audit:rewardonly:collapse") {
+    console.log(runRewardOnlyCollapseAudit());
+    return;
+  }
+
+  if (command === "audit:rewardonly:challenge-collapse") {
+    console.log(runRewardOnlyChallengeCollapseAudit());
+    return;
+  }
+
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: npm run eval | npm run export | npm run export:2d-challenge | npm run trace | npm run explain -- <trace-file> | npm run audit | npm run audit:2d | npm run audit:2d-challenge | npm run audit:2d-complex | npm run audit:arbitration | npm run audit:arbitration:matrix | npm run audit:transfer | npm run audit:transfer:cell | npm run audit:transfer:matrix | npm run audit:transfer:matrix:multi");
+  console.error("Usage: npm run eval | npm run export | npm run export:2d-challenge | npm run trace | npm run explain -- <trace-file> | npm run audit | npm run audit:2d | npm run audit:2d-challenge | npm run audit:2d-complex | npm run audit:arbitration | npm run audit:arbitration:matrix | npm run audit:transfer | npm run audit:transfer:cell | npm run audit:transfer:matrix | npm run audit:transfer:matrix:multi | npm run audit:rewardonly:collapse | npm run audit:rewardonly:challenge-collapse");
   process.exitCode = 1;
 }
 

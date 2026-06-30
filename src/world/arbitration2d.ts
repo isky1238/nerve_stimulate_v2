@@ -9,6 +9,7 @@ import {
   ChallengeExperimentResult,
   ChallengeScenario,
   ChallengeTraceStep,
+  RewardAdvantageState,
   countLearningEvents,
   createChallengeScenarios,
   scoreChallengeStep,
@@ -205,6 +206,7 @@ export function runArbitratedExperiment(
   let supervisedUpdateCount = 0;
   let captureUpdateCount = 0;
   let decayUpdateCount = 0;
+  const rewardAdvantageState: RewardAdvantageState = { baseline: 0 };
 
   for (let epoch = 0; epoch < options.epochs; epoch += 1) {
     const epochScenarios = shuffleScenarios(trainingScenarios, options.seed + epoch);
@@ -217,6 +219,7 @@ export function runArbitratedExperiment(
         seed: options.seed + epoch * 1000 + scenario.seed,
         observationDropout,
         reverseMapping: false,
+        rewardAdvantageState,
         actionResolver
       });
       const counts = countLearningEvents(episode);
@@ -264,7 +267,10 @@ export function runArbitratedExperiment(
         epochs: options.epochs,
         learningMode: options.learningMode,
         observationDropout,
-        reverseMapping: false
+        reverseMapping: false,
+        rewardAdvantageBaselineAlpha: config.rewardAdvantageBaselineAlpha,
+        explorationStrategy: config.explorationStrategy,
+        explorationEpsilon: config.explorationEpsilon
       },
       episodes
     },

@@ -94,6 +94,9 @@ function challengeMetrics(
     epochs: result.trace.config.epochs,
     maxSteps: result.trace.config.maxSteps,
     observationDropout: result.trace.config.observationDropout,
+    rewardAdvantageBaselineAlpha: result.trace.config.rewardAdvantageBaselineAlpha,
+    explorationStrategy: result.trace.config.explorationStrategy,
+    explorationEpsilon: result.trace.config.explorationEpsilon,
     claimBoundary: "pretrained candidate only; not proof of real-world autonomous learning"
   };
 }

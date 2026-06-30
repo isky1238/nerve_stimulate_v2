@@ -641,12 +641,14 @@ function auditWrongPriorDiagnostic(
     },
     conclusion:
       separation < 0
-        ? "Wrong-prior pretrained network underperforms fresh under continued learning — gate has real signal."
+        ? "Wrong-prior pretrained network still underperforms fresh after the 1-epoch pressure budget; inspect postCL fast/stable/dual-lock metrics and epoch-curve recovery before inferring unlearnability."
         : "Wrong-prior pretrained network matches or beats fresh; wrong prior was unlearned within 1 epoch (task too trivial for wrong-prior to bite).",
     notes: [
       "Diagnostic only; does not gate requiredPassed.",
       "Pretrain uses reverseMapping=true (food-left->right, toxin-left->right, etc.); continued-learning uses correct mapping.",
-      "passed=separation<0 means the test demonstrates wrong-prior hurts — this is the non-vacuity signal.",
+      "passed=separation<0 only means the test demonstrates wrong-prior hurts under this budget. Extreme uniform separation such as -1.000 is a 1-epoch pressure failure, not proof that the system cannot unlearn.",
+      "postCLWrongDirectionMaxFastWeight, postCLWrongDirectionMaxStableWeight, and postCLDualLockConfirmed distinguish partial recovery from persistent wrong-direction lock-in.",
+      "Observed 15-cell epoch curve: 1 epoch fails uniformly, 2 epochs partially recover, 3 epochs recover to fresh-level success; stable depotentiation is fast, wrong-direction fastWeight decays over 2-3 epochs.",
       "If separation>=0 across all matrix cells, the task is too trivially unlearnable; document as structural limitation, do not promote to gate."
     ]
   };

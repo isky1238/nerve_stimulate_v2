@@ -22,6 +22,23 @@ export interface ModelConfig {
   eligibilityDecay: number;
   traceDecay: number;
   fastLearningRate: number;
+  rewardAdvantageBaselineAlpha: number;
+  /**
+   * Exploration strategy for rewardOnly training.
+   * - "conflictGated" (default): force a random motor only when the network fails
+   *   to commit (noop/conflict). Masks noop from the learner during training, but
+   *   stops forcing once the network commits — which turned out to be essential
+   *   for rewardOnly convergence.
+   * - "epsilonGreedy": with probability explorationEpsilon force a random motor;
+   *   otherwise follow the network's own decision verbatim (noop stays noop, so
+   *   the learner sees its own inaction and committed directions get truthful
+   *   credit). NOTE: constant (non-annealed) ε-greedy was tried as C-tier step 1
+   *   and REGRESSED rewardOnly to 100% noop collapse on every axis (challenge
+   *   noopRate 0.857 -> 1.0, transfer pretrained noopRate 1). Kept as a toggle for
+   *   future annealed/variant experiments; not the default.
+   */
+  explorationStrategy: "conflictGated" | "epsilonGreedy";
+  explorationEpsilon: number;
   supervisedLearningRate: number;
   stableCaptureRate: number;
   stableThreshold: number;
@@ -71,6 +88,9 @@ export const defaultConfig: ModelConfig = Object.freeze({
   eligibilityDecay: 0.9,
   traceDecay: 0.85,
   fastLearningRate: 0.01,
+  rewardAdvantageBaselineAlpha: 0.1,
+  explorationStrategy: "conflictGated",
+  explorationEpsilon: 0.2,
   supervisedLearningRate: 0.08,
   stableCaptureRate: 0.02,
   stableThreshold: 0.25,

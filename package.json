@@ -20,7 +20,10 @@
     "audit:transfer": "npm run build && node dist/src/cli.js audit:transfer",
     "audit:transfer:cell": "npm run build && node dist/src/cli.js audit:transfer:cell",
     "audit:transfer:matrix": "npm run build && node dist/src/cli.js audit:transfer:matrix",
-    "audit:transfer:matrix:multi": "npm run build && node dist/src/cli.js audit:transfer:matrix:multi"
+    "audit:transfer:matrix:multi": "npm run build && node dist/src/cli.js audit:transfer:matrix:multi",
+    "audit:rewardonly:collapse": "npm run build && node dist/src/cli.js audit:rewardonly:collapse",
+    "audit:rewardonly:challenge-collapse": "npm run build && node dist/src/cli.js audit:rewardonly:challenge-collapse",
+    "audit:rewardonly:longrange": "npm run build && node scripts/longrange_sweep.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.7",

@@ -22,6 +22,7 @@ import {
   ChallengeLearningMode,
   ChallengeComplexEvidence,
   ChallengeRawObservation,
+  RewardAdvantageState,
   ChallengeScenario,
   ChallengeTerminalReason,
   ChallengeTraceStep,
@@ -35,7 +36,8 @@ import {
   scoreChallengeStep,
   selectExplorationAction,
   shuffleScenarios,
-  stepChallengeWorld
+  stepChallengeWorld,
+  updateRewardAdvantageBaseline
 } from "./challenge2d";
 
 export const DEFAULT_COMPLEX_MAX_STEPS = 6;
@@ -85,9 +87,11 @@ export function runComplexExperiment(
   let supervisedUpdateCount = 0;
   let captureUpdateCount = 0;
   let decayUpdateCount = 0;
+  const rewardAdvantageState: RewardAdvantageState = { baseline: 0 };
 
   for (let epoch = 0; epoch < options.epochs; epoch += 1) {
     const epochScenarios = shuffleScenarios(trainingScenarios, options.seed + epoch);
+    const epochEpisodes: ChallengeEpisodeTrace[] = [];
 
     for (const scenario of epochScenarios) {
       const episode = runComplexEpisode(network, scenario, config, {
@@ -96,7 +100,8 @@ export function runComplexExperiment(
         learningEnabled: options.learningMode !== "frozen",
         seed: options.seed + epoch * 1000 + scenario.seed,
         observationDropout,
-        reverseMapping: false
+        reverseMapping: false,
+        rewardAdvantageState
       });
       const counts = countLearningEvents(episode);
       rewardUpdateCount += counts.rewardUpdateCount;
@@ -104,6 +109,11 @@ export function runComplexExperiment(
       captureUpdateCount += counts.captureUpdateCount;
       decayUpdateCount += counts.decayUpdateCount;
       episodes.push(episode);
+      epochEpisodes.push(episode);
+    }
+
+    if (options.epochProbe) {
+      options.epochProbe(epoch, network, epochEpisodes);
     }
   }
 
@@ -142,7 +152,10 @@ export function runComplexExperiment(
         epochs: options.epochs,
         learningMode: options.learningMode,
         observationDropout,
-        reverseMapping: false
+        reverseMapping: false,
+        rewardAdvantageBaselineAlpha: config.rewardAdvantageBaselineAlpha,
+        explorationStrategy: config.explorationStrategy,
+        explorationEpsilon: config.explorationEpsilon
       },
       episodes
     },
@@ -170,6 +183,7 @@ export function runComplexEpisode(
     seed: number;
     observationDropout: number;
     reverseMapping: boolean;
+    rewardAdvantageState?: RewardAdvantageState;
     actionResolver?: ComplexActionResolver;
   }
 ): ChallengeEpisodeTrace {
@@ -193,13 +207,19 @@ export function runComplexEpisode(
     });
     const after = stepChallengeWorld(state, networkStep.executedAction);
     const reward = scoreChallengeStep(state, after, networkStep.executedAction);
+    const rewardBaseline = options.rewardAdvantageState?.baseline ?? 0;
+    const rewardAdvantage =
+      options.learningEnabled && options.learningMode === "rewardOnly"
+        ? reward.reward - rewardBaseline
+        : reward.reward;
     let rewardUpdates = 0;
     let captureUpdates = 0;
     let decayUpdates = 0;
 
     if (options.learningEnabled && options.learningMode === "rewardOnly") {
       const neuronsById = indexNeurons(network.neurons);
-      rewardUpdates = applyRewardLearning(network.synapses, neuronsById, reward.reward, config).length;
+      rewardUpdates = applyRewardLearning(network.synapses, neuronsById, rewardAdvantage, config).length;
+      updateRewardAdvantageBaseline(options.rewardAdvantageState, reward.reward, config);
       captureUpdates = captureStableWeights(network.synapses, config).length;
       decayUpdates = decayWeights(network.synapses, config).length;
     } else if (options.learningEnabled && options.learningMode === "supervised") {
@@ -217,6 +237,8 @@ export function runComplexEpisode(
       explorationAction: networkStep.explorationAction,
       executedAction: networkStep.executedAction,
       reward: reward.reward,
+      rewardBaseline,
+      rewardAdvantage,
       distanceDelta: reward.distanceDelta,
       after,
       terminalReason: reward.terminalReason,
@@ -457,7 +479,7 @@ function runComplexNetworkStep(
         })
       : null;
   const explorationAction =
-    resolverAction === null ? selectExplorationAction(networkDecision.action, options) : null;
+    resolverAction === null ? selectExplorationAction(networkDecision.action, options, config) : null;
   const activeMotors = explorationAction
     ? forceExplorationMotor(network, explorationAction)
     : rawActiveMotors;

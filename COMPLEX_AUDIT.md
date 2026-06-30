@@ -126,16 +126,21 @@ fastDecay=0.9995, stableThreshold=0.12, useThreshold=0.08, depotentiationRate=0.
    sensory 不受影响。
 2. **Priority 是确定性 supervised**：`expectedActionForComplexState` 是规则函数，不是学习得来。
    learnable arbitration 是步骤 2。
-3. **rewardOnly on multi-object 是 diagnostic**：不 gate。当前数据 rewardOnly Family A SR=0.5、
-   多物体 SR=0.2，远低于 supervised SR=1.0——rewardOnly 有更新与部分信号，但未自主掌握组合策略。
-   说明组合泛化需要 supervised bootstrapping，是预期 Level 4 发现。
+3. **rewardOnly on multi-object 是 structural diagnostic**：不 gate。advantage 更新后当前数据为
+   rewardOnly Family A SR=1.0、conflictRate=0，多物体 SR=0.5、conflictRate=0.3125。
+   这说明 `reward - runningBaseline` 打破了旧版 Family A 的双侧 conflict 表型，但不能解释为
+   rewardOnly credit assignment 已解决：2D-challenge rewardOnly 仍 SR=0.5 且 noopRate 高，multi-object
+   仍远低于 supervised SR=1.0。当前 rewardOnly 仍无 target 信号下的非 target motor 压制、无
+   winner-take-all、无 stableWeight depotentiation，且探索只在 noop/conflict 时触发。组合泛化目前仍主要
+   依赖 supervised bootstrapping。
 4. **新 family gate 保守（>= 0.5）**：前置验证阶段，目标是"非空真"而非"高性能"。
    Family C 当前 SR=0.5、conflictRate=0.333——距离 spike-count 产生部分可测优先级但仍是瓶颈项，
    不是"已忽略远物"。多轮矩阵稳定后再收紧。
 5. **maxSteps=6 是 complex 专属**：2D-challenge 仍用 12（dropout diagnostic 用 4）。不混淆。
 6. **distractor 物种延后**：本阶段 distractor = 距离优先级（同类近远）。新增 distractor kind
    + sensor 是步骤 1 后续子阶段，需拓扑改动，独立计划。
-7. **不修 transfer matrix**：transfer 作为固定回归 gate 保留。wrong-prior diagnostic 保持现状。
+7. **transfer matrix 只收紧解释，不提升结论**：transfer 作为固定回归 gate 保留；wrong-prior diagnostic
+   需打印 postCL wrong-direction 权重，不能把 uniform `-1.000` 包装成健康非空真。
 8. **Family E conflict 是边界记录**：equidistant 同类异侧无 priority 解，返回 "conflict"。
    验证网络仍尊重 conflict 边界（不强行仲裁）。
 9. **Spike-count 仲裁是 complex 专属**：`arbitrateComplexMotorAction` 不替换
@@ -150,8 +155,11 @@ fastDecay=0.9995, stableThreshold=0.12, useThreshold=0.08, depotentiationRate=0.
 > conflictRate=0.333）仅部分可测，仍为瓶颈项；等距真冲突（Family E）正确触发 conflict 边界；
 > dropout 0.2 required 通过。这是 **Level 4 前置验证（非 Level 4 完成）**——任务复杂度从
 > 4 patterns / 8 synapses 提升到多物体组合 + 距离优先级，compositional generalization 在
-> supervised bootstrapping 下成立。rewardOnly 多物体 SR=0.2、Family A rewardOnly SR=0.5
-> 表明 rewardOnly 有更新与部分信号，但**未自主掌握组合策略**。
+> supervised bootstrapping 下成立。advantage 更新后 rewardOnly Family A 在 complex 路径已达
+> SR=1.0，但 rewardOnly 多物体仍只有 SR=0.5、conflictRate=0.3125；2D-challenge rewardOnly
+> 仍 SR=0.5 且 noopRate 高。结论应更新为：advantage 是有效的 credit-assignment 改进，
+> 但 rewardOnly 仍缺 loser suppression、reward-driven depotentiation 和 commit 后探索，尚不能声称
+> 自主学会多物体组合策略。
 
 不要说：
 
