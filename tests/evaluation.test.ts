@@ -39,6 +39,8 @@ import { formatArbitrationAuditReport, runArbitrationAudit } from "../src/world/
 import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "../src/world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
 import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
+import { tryFormConnections, updateConnectionStates } from "../src/core/development";
+import { SeededRandom } from "../src/core/random";
 
 function assertClose(actual: number, expected: number, tolerance = 1e-12): void {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} !== ${expected}`);
@@ -514,4 +516,126 @@ test("transfer matrix aggregates stress axes and surfaces cell gate status", asy
   assert.match(formatted, /wrong-prior postCL max stable/);
   assert.match(formatted, /wrong-prior postCL dual-lock/);
   assert.match(formatted, /continued-learning/);
+});
+
+test("layered topology readoutMode=prewired is the default and keeps stem+readout edges", () => {
+  const explicit = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1,
+    readoutMode: "prewired"
+  });
+  const implicit = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1
+  });
+  // 5 stem (sensory->inter) + 5 readout (inter->motor) = 10 edges.
+  assert.equal(explicit.synapses.length, 10);
+  assert.equal(implicit.synapses.length, 10);
+  assert.equal(explicit.synapses.filter((s) => s.kind === "structuralStem").length, 5);
+  assert.equal(explicit.synapses.filter((s) => s.kind === "plasticReadout").length, 5);
+});
+
+test("layered topology readoutMode=stem leaves readout empty and reserves growth slots", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1,
+    readoutMode: "stem"
+  });
+  // Only stem edges; no pre-built readout.
+  assert.equal(topology.synapses.length, 5);
+  assert.equal(topology.synapses.every((s) => s.kind === "structuralStem"), true);
+  // Interneurons and motors need free slots for the developmental loop to
+  // attach readout synapses (otherwise hasFreeSlot is always false).
+  assert.equal(topology.interneuronNodes.every((n) => (n.maxOutputSlots ?? 0) >= 5), true);
+  assert.equal(topology.motorNodes.every((n) => (n.maxInputSlots ?? 0) >= 5), true);
+});
+
+test("layered topology readoutMode=empty places neurons only and reserves growth slots", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 2,
+    mediumCount: 5,
+    outputCount: 2,
+    synapsesPerInput: 3,
+    synapsesPerMedium: 1,
+    readoutMode: "empty"
+  });
+  assert.equal(topology.synapses.length, 0);
+  assert.equal(topology.sensoryNodes.length, 2);
+  assert.equal(topology.interneuronNodes.length, 5);
+  assert.equal(topology.motorNodes.length, 2);
+  // Every node needs growth slots so spontaneous wiring can attach on both
+  // sides of each layer.
+  assert.equal(topology.sensoryNodes.every((n) => (n.maxOutputSlots ?? 0) >= 5), true);
+  assert.equal(
+    topology.interneuronNodes.every((n) => (n.maxInputSlots ?? 0) >= 2 && (n.maxOutputSlots ?? 0) >= 5),
+    true
+  );
+  assert.equal(topology.motorNodes.every((n) => (n.maxInputSlots ?? 0) >= 5), true);
+});
+
+test("developmental step forms readout connections from a stem-only network", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1,
+    readoutMode: "stem"
+  });
+  const network = createLearningNetworkFromBlueprint(topology, defaultConfig);
+  const before = network.synapses.length;
+  const rng = new SeededRandom(42);
+  const metrics = tryFormConnections(
+    network.neurons,
+    network.synapses,
+    network.pairMemory,
+    network.tick,
+    defaultConfig,
+    rng,
+    8
+  );
+  // Readout synapses (inter->motor) should have grown.
+  assert.ok(metrics.formed > 0, "expected at least one formed connection");
+  assert.ok(network.synapses.length > before);
+  const roles = new Map(network.neurons.map((n) => [n.id, n.role]));
+  const hasReadout = network.synapses.some(
+    (s) => roles.get(s.preNeuronId) === "interneuron" && roles.get(s.postNeuronId) === "motor"
+  );
+  assert.equal(hasReadout, true);
+});
+
+test("developmental pairMemory tombstone blocks immediate re-formation after prune", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1,
+    readoutMode: "stem"
+  });
+  const network = createLearningNetworkFromBlueprint(topology, defaultConfig);
+  const rng = new SeededRandom(7);
+  // Form connections.
+  const formed = tryFormConnections(network.neurons, network.synapses, network.pairMemory, 0, defaultConfig, rng, 8);
+  assert.ok(formed.formed > 0);
+  // Force a candidate into the prune path: age it past candidateMaxAge with
+  // low recentUse so updateConnectionStates prunes it (mirrors evaluation Test D).
+  const victim = network.synapses.find((s) => s.state === "candidate");
+  assert.ok(victim);
+  victim.age = defaultConfig.candidateMaxAge + 1;
+  victim.recentUse = 0;
+  const pruned = updateConnectionStates(network.neurons, network.synapses, network.pairMemory, 1, defaultConfig);
+  assert.ok(pruned.pruned > 0);
+  // A tombstone for the pruned pair should now block re-formation within cooldown.
+  const blocked = tryFormConnections(network.neurons, network.synapses, network.pairMemory, 2, defaultConfig, rng, 8);
+  assert.ok(blocked.tombstoneHit > 0, "expected tombstone to block immediate re-formation");
 });

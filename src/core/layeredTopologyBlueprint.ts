@@ -15,6 +15,21 @@ export interface NearestLayeredTopologyOptions extends LayerCounts {
   synapsesPerMedium: number;
   structuralStableWeight?: number;
   readoutFastWeight?: number;
+  /**
+   * Readout wiring mode.
+   * - "prewired" (default): stem (sensory->inter, decayProtected) AND readout
+   *   (inter->motor, plastic) edges both pre-built. Existing behavior.
+   * - "stem": only stem edges pre-built; inter->motor readout left empty for
+   *   the developmental loop (tryFormConnections) to grow spontaneously.
+   * - "empty": no edges at all; only neurons placed. Both stem and readout
+   *   must grow spontaneously (may bootstrap-deadlock without a seed).
+   *
+   * In stem/empty modes, motorGrowthSlots reserves input slots on motor
+   * (and output slots on sensory / both on interneuron for empty) so the
+   * developmental loop has free slots to attach into.
+   */
+  readoutMode?: "prewired" | "stem" | "empty";
+  motorGrowthSlots?: number;
 }
 
 export function reduceLayerCounts(counts: LayerCounts): ReducedLayerRatio {
@@ -51,41 +66,79 @@ export function createNearestLayeredTopologyBlueprint(
   const synapsesPerMedium = boundedFanout(options.synapsesPerMedium, "synapsesPerMedium");
   const structuralStableWeight = options.structuralStableWeight ?? 1.1;
   const readoutFastWeight = options.readoutFastWeight ?? 0.35;
+  const readoutMode = options.readoutMode ?? "prewired";
+  // Growth slot budget for stem/empty modes: room for the developmental loop
+  // to attach readout synapses. Default = mediumCount (every medium could in
+  // principle connect to a given motor).
+  const growthSlots = options.motorGrowthSlots ?? mediumCount;
 
   const sensoryNodes = createLayerNodes("input", "sensory", inputCount, 0);
   const mediumNodes = createLayerNodes("medium", "interneuron", mediumCount, 1, 1);
   const motorNodes = createLayerNodes("output", "motor", outputCount, 2, 1);
   const synapses: TopologySynapseBlueprint[] = [];
+  const buildStem = readoutMode === "prewired" || readoutMode === "stem";
+  const buildReadout = readoutMode === "prewired";
 
-  for (const input of sensoryNodes) {
-    for (const medium of nearestNodes(input, mediumNodes, Math.min(synapsesPerInput, mediumNodes.length))) {
-      synapses.push({
-        kind: "structuralStem",
-        preNeuronId: input.id,
-        postNeuronId: medium.id,
-        postBranchIndex: 0,
-        fastWeight: 0,
-        stableWeight: structuralStableWeight,
-        decayProtected: true
-      });
+  if (buildStem) {
+    for (const input of sensoryNodes) {
+      for (const medium of nearestNodes(input, mediumNodes, Math.min(synapsesPerInput, mediumNodes.length))) {
+        synapses.push({
+          kind: "structuralStem",
+          preNeuronId: input.id,
+          postNeuronId: medium.id,
+          postBranchIndex: 0,
+          fastWeight: 0,
+          stableWeight: structuralStableWeight,
+          decayProtected: true
+        });
+      }
     }
   }
 
-  for (const medium of mediumNodes) {
-    for (const output of nearestNodes(medium, motorNodes, Math.min(synapsesPerMedium, motorNodes.length))) {
-      synapses.push({
-        kind: "plasticReadout",
-        preNeuronId: medium.id,
-        postNeuronId: output.id,
-        postBranchIndex: 0,
-        fastWeight: readoutFastWeight,
-        stableWeight: 0,
-        decayProtected: false
-      });
+  if (buildReadout) {
+    for (const medium of mediumNodes) {
+      for (const output of nearestNodes(medium, motorNodes, Math.min(synapsesPerMedium, motorNodes.length))) {
+        synapses.push({
+          kind: "plasticReadout",
+          preNeuronId: medium.id,
+          postNeuronId: output.id,
+          postBranchIndex: 0,
+          fastWeight: readoutFastWeight,
+          stableWeight: 0,
+          decayProtected: false
+        });
+      }
     }
   }
 
+  // Slot accounting. In prewired mode the declared edges fully determine slots
+  // (existing behavior). In stem/empty modes, motor (and in empty mode, all
+  // nodes) have fewer/no declared edges, so applySlotCounts would zero their
+  // slots and the developmental loop could never attach (hasFreeSlot always
+  // false). Reserve growth slots explicitly in those modes.
   applySlotCounts([...sensoryNodes, ...mediumNodes, ...motorNodes], synapses);
+  if (readoutMode === "stem") {
+    // Readout (inter->motor) is not pre-built, so interneurons need free
+    // OUTPUT slots and motors need free INPUT slots for the developmental
+    // loop to attach readout synapses.
+    for (const medium of mediumNodes) {
+      medium.maxOutputSlots = Math.max(medium.maxOutputSlots ?? 0, growthSlots);
+    }
+    for (const motor of motorNodes) {
+      motor.maxInputSlots = Math.max(motor.maxInputSlots ?? 0, growthSlots);
+    }
+  } else if (readoutMode === "empty") {
+    for (const sensory of sensoryNodes) {
+      sensory.maxOutputSlots = Math.max(sensory.maxOutputSlots ?? 0, growthSlots);
+    }
+    for (const medium of mediumNodes) {
+      medium.maxInputSlots = Math.max(medium.maxInputSlots ?? 0, inputCount);
+      medium.maxOutputSlots = Math.max(medium.maxOutputSlots ?? 0, growthSlots);
+    }
+    for (const motor of motorNodes) {
+      motor.maxInputSlots = Math.max(motor.maxInputSlots ?? 0, growthSlots);
+    }
+  }
 
   return Object.freeze({
     sensoryNodes: Object.freeze(sensoryNodes),

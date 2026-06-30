@@ -77,8 +77,15 @@ export function tryFormConnections(
   let remaining = maxNewConnections;
 
   for (const pre of neurons) {
-    if (remaining <= 0 || !hasFreeSlot(pre.outputSlots)) {
+    // Skip pres with no free output slot (e.g. a sensory whose stem edges
+    // already used its full slot budget), but keep scanning other pres — a
+    // later interneuron may still form readout connections. Only the global
+    // remaining-budget exhaustion should stop the whole sweep.
+    if (remaining <= 0) {
       break;
+    }
+    if (!hasFreeSlot(pre.outputSlots)) {
+      continue;
     }
 
     for (const post of neurons) {
