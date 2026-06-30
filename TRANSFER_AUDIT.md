@@ -138,7 +138,7 @@ wrong-prior axis 当前是 observational，不 gate。目标是验证 non-vacuit
 15. **wrong-prior 的磁盘 round-trip 是 suite 内联的**：不像主 supervised/rewardOnly pretrain 在 `runTransferAudit` 顶部统一做，wrong-prior pretrain 在 suite 内部做。这是为了让主 pretrain 流程不受 wrong-prior 影响，保持现有 suite 行为不变。代价是每个 cell 多一次 pretrain（~40 epoch supervised），矩阵总耗时增加约 1/3。
 16. **wrong-prior epoch curve 已把"卡死 vs 慢恢复"分开**：15-cell 曲线（pretrain seeds 101-105 × eval sets 201/301/401，continued-learning epochs 0/1/2/3/5/10）显示：0ep wrongFast≈1.959/wrongStable≈2.000；1ep preSR=0.000、freshSR=1.000、sep=-1.000、wrongFast≈1.066、wrongStable≈0.055；2ep preSR≈0.850、sep≈-0.150、wrongFast≈0.799；3ep preSR=1.000、sep=0.000、wrongFast≈0.529；10ep wrongFast≈0 且 SR=1.000。结论：supervised stable depotentiation 很快，非 stable dual-lock；1ep 失败主要是 wrong-direction fast path 尚未压下；2ep 部分恢复，3ep 恢复到 fresh-level。1ep gate 应继续作为压力诊断，但不能说系统无法 unlearn。
 
-17. **rewardOnly credit assignment 是结构性未解问题**：当前 rewardOnly 已从 raw reward 改为单边 Hebbian × advantage(`reward - runningBaseline`) 更新，fastWeight 下限仍钳 0、无符号翻转；无 target 信号时仍没有非 target motor 压制；`applyRewardLearning` 不做 stableWeight depotentiation；探索只在 noop/conflict 时触发。advantage 更新打破了 complex Family A 的旧 conflict 表型，但 2D-challenge rewardOnly 仍 SR=0.5 且 noopRate 高，multi-object 仍 SR=0.5。不能把 rewardOnly 读成已解决。
+17. **rewardOnly credit assignment 是结构性未解问题**：当前 rewardOnly 已从 raw reward 改为 Hebbian × advantage(`reward - runningBaseline`) 更新。advantage 的负 delta **已能压低活跃错误通路的 fastWeight**(去增强),但**沉默错误通路(eligibility=0)仍免疫**,且 fastWeight 下限仍钳 0、无符号翻转;无 target 信号时仍没有非 target motor 压制;`applyRewardLearning` 不做 stableWeight depotentiation;探索只在 noop/conflict 时触发。advantage 更新打破了 complex Family A 的旧 conflict 表型,但 2D-challenge rewardOnly 仍 SR=0.5 且 noopRate 高,multi-object 仍 SR=0.5。不能把 rewardOnly 读成已解决。
 
 ## 结论表述
 

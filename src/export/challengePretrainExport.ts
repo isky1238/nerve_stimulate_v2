@@ -137,7 +137,7 @@ function challengePretrainMetadata(
     ],
     boundary:
       mode === "rewardOnly"
-        ? "Reward-only used deterministic exploration in the controlled challenge."
+        ? "Reward-only used conflictGated exploration in the controlled challenge."
         : "Supervised pretrain is an upper-bound baseline with target-motor feedback."
   };
 }

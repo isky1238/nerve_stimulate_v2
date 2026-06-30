@@ -9,7 +9,7 @@ Scope: `/root/research/nerve_stimulate_v2`
 ## 当前实证基线
 
 ### 分层重构行为基线(2026-06-30)
-- 当前分支:`feat/decayprotected-sensory-stem`;本轮分层只移动边界,不引入新学习机制。
+- 当前分支:`master`(decayProtected feature + 分层 refactor 已 ff-merge 进 master 并删除原分支);本轮分层只移动边界,不引入新学习机制。
 - 冻结门:`npm test` 18/18;`audit:transfer:matrix` 15/15;`audit:2d-challenge` / `audit:2d-complex` requiredPassed=true。
 - rewardOnly collapse 基线保持:
   - `audit:rewardonly:challenge-collapse`:40ep frozen SR=0.500,conflict=0.000,noop=0.857,meanReward=0.550。
@@ -70,7 +70,7 @@ Scope: `/root/research/nerve_stimulate_v2`
 - [x] TRANSFER_AUDIT.md / COMPLEX_AUDIT.md 把 rewardOnly credit assignment 写成结构性未解问题,而非"学得慢"
 - [x] rewardOnly 改为 advantage 更新:`rewardAdvantage = reward - runningBaseline`,baseline 由 `rewardAdvantageBaselineAlpha=0.1` 更新
 - [x] trace 记录 `rewardBaseline` / `rewardAdvantage`;预训练 metadata 记录 `rewardAdvantageBaselineAlpha`
-- [x] 新增测试确认 rewardOnly trace 中 advantage 信号与 raw reward 可分离;`npm test` 16/16 通过
+- [x] 新增测试确认 rewardOnly trace 中 advantage 信号与 raw reward 可分离;`npm test` 18/18 通过
 - [x] wrong-prior epoch curve 已跑通:1ep 压力失败,2ep 部分恢复,3ep 恢复;结论从"无法 unlearn"收紧为"fast-path unlearning 慢半拍"
 
 ## 待办(按优先级)
@@ -106,6 +106,22 @@ Scope: `/root/research/nerve_stimulate_v2`
 2. **ε-greedy 替换 conflict-gated 探索**:让网络即便有弱偏好也探索,且训练期不掩盖 noop(给"该行动却没行动"一个学习信号)。
 3. **多物体 compositional vote-tie**:distance-weighted 仲裁在 rewardOnly 下失效(因 fastWeight 太低),修 1 后可能自愈,否则需独立处理。
 
+### 并发复测收紧(2026-06-30,6 audit 并发跑)
+
+复跑 `audit:2d-challenge` / `audit:2d-complex` / `audit:rewardonly:collapse` / `audit:rewardonly:challenge-collapse` / `audit:transfer:matrix` / `audit:rewardonly:longrange`(SEED_LIMIT=8),全部 requiredPassed=true,数字与基线**完全复现**(无回归):
+
+- 2d-challenge rewardOnly:SR=0.5/noop=0.857/conflict=0/meanReward=0.55 ✓
+- 2d-complex:Family A rewardOnly SR=1.0/0/0;多物体 SR=0.5/conflict=0.3125 ✓
+- transfer:matrix 15/15;rew delta=0.550;success sep=0.500;dropout 0.2=0.529/0.3=0.502;continued-learning sep=0.000;wrong-prior sep=-1.000,preTrain max fast=1.959/dual-lock=15/15 → postCL max fast=1.066/dual-lock=0/15 ✓
+- longrange 8seed×300ep:mean SR=0.906,noop=0.265,5/8 solved+3/8 partial+0/8 stuck ✓ 悬崖未复发
+
+**新观察(收紧结论):**
+
+1. **#5 challenge noop 有瞬态不对称抖动,非纯对称衰减。** `challenge-collapse`(seed 21)asymmetry 全程不平稳:epoch 10=0.345、epoch 29=0.338、epoch 32=0.317(rightFast 爬到 ~0.62、leftFast 跌到 ~0.27),但**无法锁定**,epoch 39 回收到 0.038。对照 `collapse`(complex)asymmetry 全程平稳低(~0.04,仅 epoch 26 一次 0.29 抖动)。→ challenge 网络会**短暂选边**但守不住,两侧随后在 advantage net 负 delta 下一起衰减跌破阈。这比旧表述"低对称衰减"更精确:challenge 的失败含一个**不稳定的瞬态 commit**。complex Family A 无此抖动(靠 spike-count 仲裁,不需要 commit 一侧)。
+2. **#4 多物体 conflict 模式与 supervised Family C 共享**(见上 C 档 #4 收紧):supervised 也 fail Family C 0.5/0.333,故修 rewardOnly stable 去固化不会自愈 multi-object conflict。
+3. **#3 rewardOnly wrong-prior 不可测**(见上 C 档 stable 去固化收紧):reverseMapping 对 rewardOnly 是 no-op,无注入路径。
+4. **longrange `dropTiming` 指标已失效(轻微)。** decayProtected 修复后 effSum(left+right fast+stable)单调增长(stable 持续 capture),`first epoch effSum<1.5/1.0` 恒为 0/24。该指标是为修复前的悬崖设计的,现在读数恒空。可保留作"悬崖未复发"的反向证据(0/24 dropped = 无坠崖),但不再能作坠崖时序读数。
+
 ### C. 结构性修复 — rewardOnly credit assignment(依赖 A/B 结论,**已据 A/B 重定向**)
 - [x] advantage baseline:用相对回报替代 raw reward,减少正奖励轮流共增强
 - [~] **ε-greedy 替 conflict-gated 探索 — 试了,REGRESSED,已回退默认**
@@ -124,16 +140,23 @@ Scope: `/root/research/nerve_stimulate_v2`
       → 注意:40ep 的 `audit:rewardonly:challenge-collapse` noopRate 仍 0.857(未变)——悬崖在 ~200ep 才发生,40ep 时 stem 还没跌破阈,故短期行为不变。40ep noop 是另一回事(bootstrap/commit 问题,ε-greedy 试过净负),与长程悬崖不同层。
 - [ ] 给 `applyRewardLearning` 加 loser-suppression(原计划,降级:双侧共增强已证伪,但仍可补沉默通路免疫问题)
       (当前 `applyRewardLearning` 对 eligibility=0 的沉默错误通路仍免疫;负 advantage 已能压活跃错误通路)
-- [ ] 把 supervised 的 `wasWronglyActive` 去固化逻辑以 reward-driven 形式补进 rewardOnly
-      (当前 rewardOnly 仍无 stableWeight depotentiation 路径,只能靠 stableDecay=0.99999 被动遗忘;A/B 证实 supervised stable 去固化很快,rewardOnly 缺这个 → wrong-prior 在 rewardOnly 下会卡更久,待测)
-- [ ] 多物体 compositional vote-tie:先看修上面两项后是否自愈
+- [x] 把 supervised 的 `wasWronglyActive` 去固化逻辑以 reward-driven 形式补进 rewardOnly
+      (当前 rewardOnly 仍无 stableWeight depotentiation 路径,只能靠 stableDecay=0.99999 被动遗忘)
+      **【并发复测收紧 2026-06-30】** "wrong-prior 在 rewardOnly 下会卡更久" 此前判为**不可测**:`reverseMapping` 只翻 `expectedAction`(`challenge2d.ts:250-252`),reward 由 `scoreChallengeStep(state,after,executedAction)` 算、不读 expectedAction,rewardOnly 路径(`:270-275`)用 `rewardAdvantage=reward-baseline` 也不读 expectedAction → **rewardOnly+reverseMapping 注入是 pure no-op**。transfer:matrix wrong-prior 只跑 supervised。
+      **【已测 2026-06-30,`scripts/wrongprior_rewardonly.cjs`,6seed×300ep,只读脚本不改源】** 用 **bypass 设计**绕开上述 no-op:**Phase1 用 supervised+reverseMapping 注入 wrong-prior**(supervised 读 expectedAction,有效;preTrain dualLock=6/6、wrongMaxStable=2.0=maxWeight),**Phase2 两臂都用 reverseMapping=false(正确映射)继续学**,只变 learningMode。这样 reward 是真实正确映射 reward,wrong-prior 网络被 stable 逼着做错→低 reward→负 advantage→压 fast(实测 rewardOnly 臂 wrongMaxFast 0.68→0.05,主动信号,非 no-op)。
+      → 结果:supervised 臂 6/6 在 **1ep** 恢复(SR=1.0)、1ep 清空 dualLock(wrongMaxStable 2.0→0.073,`wasWronglyActive` 一刀砍到阈下);**rewardOnly 臂 0/6 在 300ep 内恢复、0/6 清空 dualLock,wrongMaxStable 全程钉死 2.000,SR 全程 0,dualLock 100%**。
+      → 结论比原假设更强:不是"卡更久",是"**300ep 内永久卡死**"。根因双层:① `applyRewardLearning` 只动 fastWeight(deltaStable:0)、不碰 stableWeight,stable=2.0 单凭自己持续驱动错误 motor,fast 衰减 irrelevant;② **自维持锁**——错误 stable(2.0)驱动错误 motor 发放→coactivity→eligibility>0→`captureStableWeights` 每步把 fast→stable 回补,stable 钉在 maxWeight=2.0 不被动衰减(对比 supervised 臂砍到 0.073 阈下后停发→无 coactivity→无 capture→只剩被动慢衰减 0.073→0.066)。③ 正确通路 correctMaxFast 全程 0.000——错误 stable 逼网络一直失败→负 advantage→正确突触 eligibilityTrace=0 被 `continue` 跳过,bootstrap 不起来(与第1条 bootstrap/commit 同根)。
+      → 公平性边界:wrong-prior 由 supervised 注入(人工强 stable=2.0 锁)。实验回答"**给定 stable dual-lock,rewardOnly 能否解开→不能**",不回答"rewardOnly 是否会自造这种锁"(那归长程悬崖/collapse audit)。
+      → 工程含义:reward-driven stable 去固化是**必要的**(能打断自维持锁),但单加它解不了 correct-path bootstrap(correctMaxFast=0),必须与第1条同治。
+- [ ] 多物体 compositional vote-tie
+      **【并发复测收紧 2026-06-30】** 不能指望"修 rewardOnly stable 去固化后自愈":supervised **本身**就 fail Family C(distractor)SR=0.5/conflict=0.333(`audit:2d-complex` required 项),而 supervised 已有 stable 去固化。rewardOnly 多物体 conflict=0.3125 的签名与 Family C 的 0.333 一致 → conflict 模式是**共享的 distractor 距离仲裁极限**,非 rewardOnly 特有 credit 缺口。修 #1 不会消除 Family-C conflict。本项需独立的距离仲裁修复(与 #1 解耦)。注:rewardOnly 多物体 SR=0.5 仍低于 supervised 多物体(B/D=1.0+C=0.5≈0.83),所以另有 rewardOnly 特有的幅度缺口,但 conflict 模式本身共享。
 - [ ] 修复后重跑目标:
       2D-challenge rewardOnly SR > 0.5 且 noopRate 明显下降(< 0.3);
       2D-complex multi-object rewardOnly SR > 0.5 且 conflictRate < 0.3;
       transfer matrix rewardOnly sep 不因修复翻负(ε-greedy 已证会翻负,新机制必须不翻负);
       **新增回归**:`audit:rewardonly:challenge-collapse` 训练期 trainNoopRate > 0(不再被掩盖)、最终 evalNoopRate 下降。
 
-**C 档进度:ε-greedy(常数)净负已回退;长程 noop 悬崖已修(decayProtected sensory stem,24/24 stuck→0/24)。剩余:rewardOnly 40ep 短期 noop(bootstrap/commit,非悬崖)、多物体 compositional vote-tie、rewardOnly stable depotentiation。**
+**C 档进度:ε-greedy(常数)净负已回退;长程 noop 悬崖已修(decayProtected sensory stem,24/24 stuck→0/24);rewardOnly stable 去固化缺口已实测坐实(6seed×300ep,supervised 1ep 恢复 vs rewardOnly 0/6 永久卡死,自维持 stable 锁)。剩余:rewardOnly 40ep 短期 noop(bootstrap/commit,非悬崖)、多物体 compositional vote-tie(supervised 也 fail Family C,需独立距离仲裁修复)。**
 
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
@@ -160,6 +183,7 @@ Scope: `/root/research/nerve_stimulate_v2`
 2. advantage 更新是有效的第一步:complex Family A rewardOnly 从旧 conflict 塌缩恢复到 SR=1.0;2D-challenge rewardOnly 仍 SR=0.5 但 noopRate=0.857;多物体 rewardOnly 仍 SR=0.5/conflict=0.333。
 3. **A/B 探针证伪了"双侧共增强→conflict 塌缩"假说**:complex Family A 训练全程 trainConflict=0、双侧 fastWeight 对称衰减、靠 spike-count 仲裁解决;challenge 的 noop 是 fastWeight 衰减低于 motor 阈值 + conflict-gated exploration 在训练期掩盖 noop 所致;多物体 conflict 是 compositional vote-tie。三者机制不同,不能用同一个 bilateral 修复。
 4. rewardOnly credit assignment 仍未完整解决,但**缺口重定向**:优先级从"loser-suppression/互斥"转为"① ε-greedy 探索(揭 noop)+ ② fastWeight 衰减/阈值 + ③ reward-driven stable depotentiation(wrong-prior 在 rewardOnly 下会卡更久)"。
-5. wrong-prior = 慢恢复:stable depotentiation 1ep 清空 dual-lock,fast-path 2-3ep 恢复。非 stable lock-in、非无法 unlearn。
+5. wrong-prior = 慢恢复(supervised 下):stable depotentiation 1ep 清空 dual-lock,fast-path 2-3ep 恢复。非 stable lock-in、非无法 unlearn。**但 rewardOnly 下结论反转(见 8)**。
 6. 新诊断工具:`audit:rewardonly:collapse`(complex)+ `audit:rewardonly:challenge-collapse`(challenge),per-epoch 双侧 fastWeight 对称性 + 训练 conflict/noop 曲线,作为 C 档修复的回归基准。
 7. **长程验证推翻"fast 衰减跌破阈"假说,坐实真根因**:24seed×300ep 显示 rewardOnly 是"爬升到峰(~200ep SR 0.865)→ 灾难性悬崖(300ep 0/24 全死)",非单调恢复。真因不是 inter→motor fast/credit,而是 **sensory→inter 结构干线(init stable=1.1)被 `stableDecay=0.99999` 侵蚀,~200-250ep 跌破 inter axon 阈值 1.0 → inter 停发 → 整条 motor 链静默**(两 tick 架构下 inter somaPotential 是单次传导无累积,故是硬悬崖)。吸收态不可逆。反证:全局 `stableDecay=1.0` 悬崖消失。**修复**:给 `Synapse.decayProtected` 标记结构性干线,`decayWeights` 跳过其 stableDecay(learned 突触仍衰减)。修后 300ep 0/24→19/24 solved、transfer gate 不翻负。教训:① "权重跌破阈"得看**哪条**权重(sensory→inter 干线 vs inter→motor 学习突触),不能笼统;② 长程(>200ep)才暴露的悬崖不会被 40ep audit 看见,评估必须有长程基线;③ 结构性硬线与可遗忘记忆不该共用同一 passive decay。
+8. **wrong-prior × rewardOnly 实测坐实 stable 去固化缺口(2026-06-30,`scripts/wrongprior_rewardonly.cjs`,6seed×300ep)**:supervised+reverseMapping 注入 wrong-prior(stable=2.0=maxWeight,dualLock=6/6),两臂都用正确映射继续学。supervised 臂 1ep 恢复、1ep 清 dualLock(`wasWronglyActive` 砍 stable 2.0→0.073);**rewardOnly 臂 0/6 在 300ep 恢复、0/6 清 dualLock,wrongMaxStable 全程钉死 2.000,SR 全程 0**。根因:rewardOnly `applyRewardLearning` 只动 fast(deltaStable:0)、不碰 stable;stable=2.0 单凭自己持续驱动错误 motor;且**自维持锁**——错误 stable 驱动错误 motor 发放→coactivity→`captureStableWeights` 每步回补 fast→stable,stable 钉在 maxWeight 不被动衰减;正确通路 correctMaxFast 全程 0(eligibility=0 被 skip,bootstrap 不起来)。**注**:此前判此题"不可测"(rewardOnly+reverseMapping 注入是 no-op,因 reward 不读 expectedAction),bypass 设计用 supervised 注入 + rewardOnly 正确映射 unlearn 绕开。结论:reward-driven stable 去固化**必要**但**不充分**(解不了 correct-path bootstrap,须与第1条同治)。
