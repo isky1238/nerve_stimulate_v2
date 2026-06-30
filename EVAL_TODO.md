@@ -158,6 +158,39 @@ Scope: `/root/research/nerve_stimulate_v2`
 
 **C 档进度:ε-greedy(常数)净负已回退;长程 noop 悬崖已修(decayProtected sensory stem,24/24 stuck→0/24);rewardOnly stable 去固化缺口已实测坐实(6seed×300ep,supervised 1ep 恢复 vs rewardOnly 0/6 永久卡死,自维持 stable 锁)。剩余:rewardOnly 40ep 短期 noop(bootstrap/commit,非悬崖)、多物体 compositional vote-tie(supervised 也 fail Family C,需独立距离仲裁修复)。**
 
+### E. STDP/BAP 塑性基线大改(2026-06-30,分支 `feat/stdp-bap-baseline`,粗颗粒度跑通)
+
+动机:把"重要性判定"从前向瞬时二值 coactivity 改为后向 BAP 加权 × STDP 时间窗,对治五层缺口(载体/时间因果/信用分配/错误信号/力度)。计划见 `/root/.claude/plans/functional-napping-clarke.md`。两阶段,soft 红线(翻负记录不回退)。
+
+**Phase 1(载体+时间窗,commit 3888c5d):**
+- `updateEligibility` 重写为 signed STDP:`ltp=stdpLtpRate×preTrace×postActive×bapWeight`,`ltd=stdpLtdRate×postTrace×preActive×bapWeight`;`bapWeight=effectSign×|effectiveWeight|`(保留抑制性符号,按贡献加权)。preTrace/postTrace 从死代码激活,稳态归一化到 [0,1]。complex2d 的 eligibility 更新移入 micro-tick 循环。supervised stable 去固化触发条件 `elig>0` → `wasWronglyActive + |elig|`(STDP signed 不再让错误突触靠 LTD 负号逃过去固化)。
+- 状态:supervised SR=1.0 不变(requiredPassed=true);rewardOnly 退化到 noop(eligibility 幅度 ~0.05,比 baseline ±1 弱 ~20x);2 transfer 测试挂(soft)。
+
+**Phase 2(信用分配+modulator,commit e3eff46):**
+- `normalizeEligibility`:per-post-spike 除法归一化正 eligibility(总 LTP credit 每次 post 发放=1.0),`eligibilityNormalization` toggle(默认 on)。`computeModulator=tanh(|advantage|×modulatorGain)` 与二值 inhibition-freeze gate 复合。`applyRewardLearning`/`applySupervisedMotorLearning` 加 modulator 参数(supervised 传 1)。**未补 reward→stable 去固化**(plan 2.3:看新载体能否自愈)。
+- 状态:`npm test` 18/18(Phase 2 归一化+modulator 让 rewardOnly 恢复非零行为,解开 Phase 1 挂的 2 transfer 测试)。rewardOnly SR=0.25/noop=0.947(baseline 0.5/0.857,比 Phase 1 的 noop=1.0 恢复但仍低于 baseline)。**红线 requiredPassed=true,rew delta min=0.275(baseline 0.55,降但不翻负)**。
+
+**关键验证(整体效应,`scripts/coactivity_sweep.cjs`,6seed×40ep rewardOnly):**
+- **不是"某些 seed 极端化"——是所有 seed 一致塌缩**:`%extremeMax=0`(归一化控住单突触失控),但 `%collapse=100%`(全突触 eligibility 同号正)。
+- **STDP 的 LTD 半边基本是死的**:LTP/LTD balance = 5e8(正 eligibility 远大于负)。两 tick 结构下 post-before-pre 时序几乎不发生 → LTD 项不激活。STDP 退化成纯 Hebbian LTP。
+- elig-|eff| 相关性 0.83-0.97:BAP 加权生效(强突触 elig 大),但正反馈风险(强→elig 大→更强)。
+- eligibility 幅度 0.2(归一化后比 Phase 1 的 0.05 大,但仍比 baseline ±1 小)。
+
+**wrong-prior 自愈测试(`wrongprior_rewardonly.cjs`,6seed×50ep):**
+- rewardOnly 仍 **0/6 自愈**,dualLock 100% 全程,wrongMaxStable 2.0→1.942 几乎不动。**新载体(BAP+STDP+信用分配+modulator)没能让 rewardOnly 解开 stable 锁** → 坐实 plan 2.3 "不能→后续单独加 reward→stable 去固化开关" 分支。
+- 副作用:supervised 臂 dual-lock 现在**也清不掉**(supDLC=never vs baseline 1ep 清空)——|elig| 太小,stable 去固化砍不到阈下。supTTR 仍在(8.2ep 恢复行为,靠 fastWeight),但 stable 锁残留。
+
+**E 档结论(粗颗粒度,待统一度量衡):**
+1. 两阶段语义链已搭通,supervised 不破(18/18,requiredPassed=true),红线不翻负(rew delta 0.275>0)。
+2. rewardOnly 行为低于 baseline(SR 0.25 vs 0.5),属计划预期"效果差后期解决"。
+3. 诊断坐实两个结构性问题(非 seed 随机性、非参数微调能解):
+   - **STDP LTD 半边在两 tick 结构下不激活**(post-before-pre 时序罕见)→ STDP 退化纯 LTP,失去"削弱错误突触"的能力。这是时间窗+拓扑的耦合问题,粗颗粒度 trace 衰减无法解,需统一度量衡时的传导延迟/物理时间轴。
+   - **eligibility 幅度比 baseline 弱 ~5-20x**(归一化+STDP 稀疏性)→ 依赖 elig 幅度的学习(rewardOnly 建通路、supervised stable 去固化)都变慢/失效。
+4. **新载体不能自愈 rewardOnly 的 stable 锁** → 印证"reward→stable 去固化开关仍必要"(与 C 档 #3 一致),但单加它(上一轮 C3 结论)不充分,需与新载体同治。
+5. 下一步优先级:统一度量衡(物理时间轴/传导延迟,让 LTD 半边能激活 + eligibility 幅度重定标),再评估是否补 reward→stable 去固化。本轮不补,守住"先看新载体能否自愈"的归因干净性。
+
+**E 档不做(本分支 out of scope,留统一度量衡):** 物理时间轴(tick→ms)、传导延迟队列、严格 τ₊/τ₋ 生物数值对齐、reward→stable 去固化开关。
+
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
       → 让 continued-learning sep 能取正值,而非恒 0
