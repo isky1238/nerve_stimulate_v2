@@ -8,6 +8,9 @@ import { explainTrace, runLearningTrace } from "../src/core/trace";
 import { createChallengePretrainExports } from "../src/export/challengePretrainExport";
 import { formatWorld2DAuditReport, runWorld2DAudit } from "../src/world/audit2d";
 import { formatWorld2DChallengeAuditReport, runWorld2DChallengeAudit } from "../src/world/audit2dChallenge";
+import { formatWorld2DComplexAuditReport, runWorld2DComplexAudit } from "../src/world/audit2dComplex";
+import { formatArbitrationAuditReport, runArbitrationAudit } from "../src/world/auditArbitration";
+import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "../src/world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
 import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
 
@@ -130,6 +133,56 @@ test("2D-challenge pretrained exports preserve learned network snapshots", () =>
   assert.ok(Number(rewardOnly.snapshot.metrics.rewardUpdateCount) > 0);
   assert.ok(Number(supervised.snapshot.metrics.supervisedUpdateCount) > 0);
   assert.equal(rewardOnly.snapshot.events[0] && typeof rewardOnly.snapshot.events[0], "object");
+});
+
+test("2D-complex audit passes required bottleneck suites and preserves conflict boundary", () => {
+  const report = runWorld2DComplexAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const conflictSuite = report.suites.find((suite) => suite.name === "2D-complex conflict boundary (Family E)");
+  const baselineSuite = report.suites.find((suite) => suite.name === "2D-complex supervised multi-step baseline (Family A)");
+  const formatted = formatWorld2DComplexAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 9);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.equal(conflictSuite?.metrics.firstExecutedAction, "conflict");
+  assert.ok(Number(baselineSuite?.metrics.supervisedUpdateCount ?? 0) > 0);
+  assert.match(formatted, /2D-complex/);
+  assert.match(formatted, /Family/);
+});
+
+test("arbitration audit passes required suites and preserves true conflict boundary", () => {
+  const report = runArbitrationAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const semanticSuite = report.suites.find((suite) => suite.name === "arbitration supervised semantic conflict resolution (Family F train)");
+  const conflictSuite = report.suites.find((suite) => suite.name === "arbitration true conflict preservation (Family E)");
+  const formatted = formatArbitrationAuditReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 7);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.ok(Number(semanticSuite?.metrics.trainedSuccessRate ?? 0) >= 0.9);
+  assert.equal(conflictSuite?.metrics.firstExecutedActions, "conflict,conflict");
+  assert.match(formatted, /arbitration/);
+});
+
+test("arbitration matrix audit passes required suites and preserves true conflict at default tau", () => {
+  const report = runArbitrationMatrixAudit(defaultConfig);
+  const requiredSuites = report.suites.filter((suite) => suite.required);
+  const disjointSuite = report.suites.find((suite) => suite.name === "arbitration matrix disjoint scenario generalization");
+  const conflictSuite = report.suites.find((suite) => suite.name === "arbitration matrix true conflict preservation at default tau");
+  const blankSuite = report.suites.find((suite) => suite.name === "arbitration matrix blank world preservation");
+  const formatted = formatArbitrationMatrixReport(report);
+
+  assert.equal(report.requiredPassed, true);
+  assert.ok(requiredSuites.length >= 5);
+  assert.equal(requiredSuites.every((suite) => suite.passed), true);
+  assert.ok(Number(disjointSuite?.metrics.trainedSuccessRate ?? 0) >= 0.8);
+  assert.ok(Number(disjointSuite?.metrics.freshSuccessRate ?? 1) <= 0.2);
+  assert.ok(Number(conflictSuite?.metrics.fallbackRate ?? 0) >= 0.9);
+  assert.equal(blankSuite?.metrics.noopRate, 1);
+  assert.match(formatted, /arbitration matrix/);
+  assert.match(formatted, /tau/);
 });
 
 test("transfer audit passes required suites and reports pretrained-vs-fresh separation", () => {

@@ -71,22 +71,49 @@ function validateStructure(snapshot: NetworkExport, network: LearningNetwork): v
   }
 
   const snapshotNeurons = snapshot.neurons as SnapshotNeuron[];
+  if (snapshotNeurons.length !== network.neurons.length) {
+    throw new Error(
+      `Neuron count mismatch: skeleton=${network.neurons.length} snapshot=${snapshotNeurons.length}`
+    );
+  }
   const snapshotNeuronsById = new Map(snapshotNeurons.map((neuron) => [neuron.id, neuron]));
   for (const neuron of network.neurons) {
     if (!snapshotNeuronsById.has(neuron.id)) {
       throw new Error(`Skeleton neuron ${neuron.id} missing from snapshot`);
     }
   }
+  const skeletonNeuronIds = new Set(network.neurons.map((neuron) => neuron.id));
+  for (const snapshotNeuron of snapshotNeurons) {
+    if (!skeletonNeuronIds.has(snapshotNeuron.id)) {
+      throw new Error(`Snapshot neuron ${snapshotNeuron.id} not in skeleton (extra)`);
+    }
+  }
 
   const snapshotBranches = snapshot.branches as SnapshotBranch[];
+  const skeletonBranchKeys: string[] = [];
+  for (const neuron of network.neurons) {
+    for (const branch of neuron.branches) {
+      skeletonBranchKeys.push(`${neuron.id}:${branch.id}`);
+    }
+  }
+  if (snapshotBranches.length !== skeletonBranchKeys.length) {
+    throw new Error(
+      `Branch count mismatch: skeleton=${skeletonBranchKeys.length} snapshot=${snapshotBranches.length}`
+    );
+  }
   const snapshotBranchesByKey = new Map(
     snapshotBranches.map((branch) => [`${branch.neuronId}:${branch.branchId}`, branch])
   );
-  for (const neuron of network.neurons) {
-    for (const branch of neuron.branches) {
-      if (!snapshotBranchesByKey.has(`${neuron.id}:${branch.id}`)) {
-        throw new Error(`Skeleton branch ${neuron.id}:${branch.id} missing from snapshot`);
-      }
+  for (const key of skeletonBranchKeys) {
+    if (!snapshotBranchesByKey.has(key)) {
+      throw new Error(`Skeleton branch ${key} missing from snapshot`);
+    }
+  }
+  const skeletonBranchKeySet = new Set(skeletonBranchKeys);
+  for (const snapshotBranch of snapshotBranches) {
+    const key = `${snapshotBranch.neuronId}:${snapshotBranch.branchId}`;
+    if (!skeletonBranchKeySet.has(key)) {
+      throw new Error(`Snapshot branch ${key} not in skeleton (extra)`);
     }
   }
 }

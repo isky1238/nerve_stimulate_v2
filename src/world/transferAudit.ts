@@ -718,7 +718,9 @@ function dumpWrongPriorSynapseState(
   lines.push(`dualLock=${wrongDirectionStableCount > 0} (if true, stableWeight drives wrong motor even after fastWeight unlearn)`);
   lines.push("=== end dump ===");
 
-  process.stderr.write(lines.join("\n") + "\n");
+  if (process.env.DEBUG_WRONG_PRIOR_DUMP === "1") {
+    process.stderr.write(lines.join("\n") + "\n");
+  }
 
   return {
     wrongDirectionStableCount,

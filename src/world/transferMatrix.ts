@@ -6,13 +6,15 @@ import { TransferAuditReport, TransferAuditSuiteResult } from "./transferAudit";
 export const MATRIX_TMP_DIR = join("exports", "pretrained", "transfer-matrix-tmp");
 
 export function cellTmpDir(label: string): string {
-  return join(MATRIX_TMP_DIR, label);
+  const root = process.env.TRANSFER_MATRIX_TMP_ROOT ?? MATRIX_TMP_DIR;
+  return join(root, label);
 }
 
 export interface TransferMatrixOptions {
   pretrainSeeds?: number[];
   evalSeedSets?: number[][];
   concurrency?: number;
+  tmpRoot?: string;
 }
 
 export interface TransferMatrixCell {
@@ -136,6 +138,7 @@ export async function runTransferAuditMatrix(
 ): Promise<TransferMatrixReport> {
   const cells = buildTransferMatrixGrid(options);
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
+  const tmpRoot = options.tmpRoot ?? MATRIX_TMP_DIR;
 
   const results: TransferMatrixCellResult[] = [];
   const queue = [...cells];
@@ -146,18 +149,18 @@ export async function runTransferAuditMatrix(
       if (!cell) {
         return;
       }
-      results.push(await runCell(cell));
+      results.push(await runCell(cell, tmpRoot));
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, cells.length) }, () => worker()));
 
-  rmSync(MATRIX_TMP_DIR, { recursive: true, force: true });
+  rmSync(tmpRoot, { recursive: true, force: true });
 
   return summarize(cells, results, concurrency);
 }
 
-async function runCell(cell: TransferMatrixCell): Promise<TransferMatrixCellResult> {
+async function runCell(cell: TransferMatrixCell, tmpRoot: string): Promise<TransferMatrixCellResult> {
   const cliPath = join(__dirname, "..", "cli.js");
   const args = [
     "audit:transfer:cell",
@@ -169,7 +172,10 @@ async function runCell(cell: TransferMatrixCell): Promise<TransferMatrixCellResu
   const start = Date.now();
 
   return new Promise((resolve) => {
-    const child = fork(cliPath, args, { silent: true });
+    const child = fork(cliPath, args, {
+      silent: true,
+      env: { ...process.env, TRANSFER_MATRIX_TMP_ROOT: tmpRoot }
+    });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
 
@@ -515,11 +521,12 @@ export async function runTransferAuditMatrixMulti(
   const concurrency = options.concurrency ?? DEFAULT_MULTI_MATRIX_CONCURRENCY;
 
   const matrices = await Promise.all(
-    pools.map((pool) =>
+    pools.map((pool, index) =>
       runTransferAuditMatrix({
         pretrainSeeds: pool.pretrainSeeds,
         evalSeedSets: pool.evalSeedSets,
-        concurrency
+        concurrency,
+        tmpRoot: join(MATRIX_TMP_DIR, `pool-${index}`)
       })
     )
   );

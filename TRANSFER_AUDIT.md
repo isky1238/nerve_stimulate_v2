@@ -125,15 +125,11 @@ wrong-prior axis 当前是 observational，不 gate。目标是验证 non-vacuit
 9. **continued-learning gate 是强声明**：`min >= 0` 意味着"预训练永不吃亏，即便给 fresh 等量继续训练预算"。当前 15 格支持此声明；若未来某格 fresh 追上，gate 会失败，这是设计意图。
 10. **rewardOnly success separation gate 在 frozen 下与 suite 3 冗余**：frozen 下 fresh 恒 noop（successRate=0），suite 3 已要求 `pretrained.successRate > 0`。此 gate 在 continued-learning 矩阵中才独立起作用，但写在 frozen 矩阵里是冗余防御——若未来 fresh-frozen 不再恒 noop（例如初始权重改了），此 gate 会独立 catch。
 11. **dropout maxSteps=4 是刻意的，已让 axis 非空真**：12 步预算下 frozen 网络只需 2-3 可见步即成功，dropout 0.3 期望可见步 ~8.4，无影响——15 格 dropout delta 与 frozen baseline 完全相同。4 步预算下 dropout 0.3 期望可见步 ~2.8，产生真实退化：`dropout 0.2 rewardOnly delta min=0.725 mean=0.964`，`dropout 0.3 rewardOnly delta min=0.670 mean=0.947`，梯度可见。若 maxSteps=4 下 dropout delta 跨多轮矩阵稳定不翻负，可考虑升级为 gate。
-12. **continued-learning 1 epoch + 1 trainSeed 是刻意的，但不足以让 gate 非空真**：5 epoch on `[1..5]` 让 fresh 饱和到 successRate=1.0，separation=0.000 永真。收紧到 1 epoch on `[1]`（4 episodes，~8-12 updates/synapse vs ~9 needed for threshold）后，fresh 仍在 15 格全部饱和——任务（4 patterns / 8 synapses / lr 0.08）过于平凡地可学。**此 gate 的价值是捕获 reversal（pretrained 在继续训练下退化，separation < 0），不是测量正向 head-start**。要把 separation 推到正数，需要 wrong-prior（pretrained 必须先 unlearn）或扩展任务复杂度——两者均 out of scope（见 boundary 13）。当前 15 格 `continued-learning sep: min=0.000 mean=0.000 max=0.000`，reversals=0，gate 通过的含义是"预训练不退化"，不是"预训练有正向 head-start"。
-13. **本阶段不引入 wrong-prior 测试**：wrong-prior（预训练用相反映射）能让 continued-learning gate 真正可失败（pretrained 必须先 unlearn 再 relearn），但需要新代码（`expectedActionForChallengeState` 硬编码，需加 `reverseMapping` flag）。本阶段保持最小范围，wrong-prior 留待下一阶段。
-
-> 已过时：本阶段（wrong-prior 引入后）已实现 `reverseMapping` flag 与 `auditWrongPriorDiagnostic`。下面 14-17 是 wrong-prior 阶段的边界。
-
-14. **wrong-prior 仅对 supervised 有意义**：rewardOnly 不读 `expectedAction`（仅 reward-driven），`reverseMapping` 对 rewardOnly 是 no-op。本阶段 wrong-prior diagnostic 只测 supervised pretrained。
-15. **wrong-prior `passed=separation<0` 是非空真信号，不是错误**：与其他 diagnostic 的 `passed` 语义不同——这里 `passed=true` 意味"测到了预期退化"，`passed=false` 意味"wrong-prior 被 1 epoch 完全 unlearn，任务太平凡"。报告读者需注意此语义反转。
-16. **wrong-prior 的磁盘 round-trip 是 suite 内联的**：不像主 supervised/rewardOnly pretrain 在 `runTransferAudit` 顶部统一做，wrong-prior pretrain 在 suite 内部做。这是为了让主 pretrain 流程不受 wrong-prior 影响，保持现有 suite 行为不变。代价是每个 cell 多一次 pretrain（~40 epoch supervised），矩阵总耗时增加约 1/3。
-17. **wrong-prior 仍受任务复杂度限制**：若 1 epoch continued-learning 足以把 wrong-prior fastWeight 从 1.0 压到 threshold 以下（错误 motor 不再激活），separation 趋 0。supervised 的 -lr*0.7 vs +lr 不对称（衰减比增强慢 30%），wrong-prior 应该能产生信号，但需矩阵数据验证。若跨格 separation 仍为 0，则任务复杂度限制确认触及天花板，下一阶段需任务复杂度扩展（Level 4）。
+12. **continued-learning 1 epoch + 1 trainSeed 是刻意的，但不足以让 gate 非空真**：5 epoch on `[1..5]` 让 fresh 饱和到 successRate=1.0，separation=0.000 永真。收紧到 1 epoch on `[1]`（4 episodes，~8-12 updates/synapse vs ~9 needed for threshold）后，fresh 仍在 15 格全部饱和——任务（4 patterns / 8 synapses / lr 0.08）过于平凡地可学。**此 gate 的价值是捕获 reversal（pretrained 在继续训练下退化，separation < 0），不是测量正向 head-start**。要把 separation 推到正数，需要 wrong-prior（pretrained 必须先 unlearn）或扩展任务复杂度——前者已在 wrong-prior diagnostic 中实现（见 boundary 13），后者 out of scope。当前 15 格 `continued-learning sep: min=0.000 mean=0.000 max=0.000`，reversals=0，gate 通过的含义是"预训练不退化"，不是"预训练有正向 head-start"。
+13. **wrong-prior 仅对 supervised 有意义**：rewardOnly 不读 `expectedAction`（仅 reward-driven），`reverseMapping` 对 rewardOnly 是 no-op。本阶段 wrong-prior diagnostic 只测 supervised pretrained。
+14. **wrong-prior `passed=separation<0` 是非空真信号，不是错误**：与其他 diagnostic 的 `passed` 语义不同——这里 `passed=true` 意味"测到了预期退化"，`passed=false` 意味"wrong-prior 被 1 epoch 完全 unlearn，任务太平凡"。报告读者需注意此语义反转。
+15. **wrong-prior 的磁盘 round-trip 是 suite 内联的**：不像主 supervised/rewardOnly pretrain 在 `runTransferAudit` 顶部统一做，wrong-prior pretrain 在 suite 内部做。这是为了让主 pretrain 流程不受 wrong-prior 影响，保持现有 suite 行为不变。代价是每个 cell 多一次 pretrain（~40 epoch supervised），矩阵总耗时增加约 1/3。
+16. **wrong-prior 仍受任务复杂度限制**：若 1 epoch continued-learning 足以把 wrong-prior fastWeight 从 1.0 压到 threshold 以下（错误 motor 不再激活），separation 趋 0。supervised 的 -lr*0.7 vs +lr 不对称（衰减比增强慢 30%），wrong-prior 应该能产生信号，但需矩阵数据验证。若跨格 separation 仍为 0，则任务复杂度限制确认触及天花板，下一阶段需任务复杂度扩展（Level 4）。
 
 ## 结论表述
 

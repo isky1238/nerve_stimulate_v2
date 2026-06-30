@@ -56,6 +56,11 @@ export interface ChallengeLearningStep {
   decayUpdates: number;
 }
 
+export interface ChallengeComplexEvidence {
+  interSpikeCounts: Record<string, number>;
+  motorSpikeCounts: Record<string, number>;
+}
+
 export interface ChallengeTraceStep {
   index: number;
   before: WorldState;
@@ -72,6 +77,7 @@ export interface ChallengeTraceStep {
   terminal: boolean;
   success: boolean;
   learning: ChallengeLearningStep;
+  complexEvidence?: ChallengeComplexEvidence;
 }
 
 export interface ChallengeEpisodeTrace {
@@ -507,7 +513,7 @@ function runChallengeNetworkStep(
   };
 }
 
-function selectExplorationAction(
+export function selectExplorationAction(
   action: WorldAction,
   options: { learningMode: ChallengeLearningMode; learningEnabled: boolean; phase: ChallengeEpisodePhase; rng: SeededRandom }
 ): WorldAction | null {
@@ -522,7 +528,7 @@ function selectExplorationAction(
   return options.rng.nextInt(2) === 0 ? "left" : "right";
 }
 
-function forceExplorationMotor(network: LearningNetwork, action: WorldAction): string[] {
+export function forceExplorationMotor(network: LearningNetwork, action: WorldAction): string[] {
   const targetMotorId = targetMotorForAction(action);
 
   if (targetMotorId === null) {
@@ -539,7 +545,7 @@ function forceExplorationMotor(network: LearningNetwork, action: WorldAction): s
   return activeMotorIds(network);
 }
 
-function scoreChallengeStep(before: WorldState, after: WorldState, action: WorldAction): RewardResult {
+export function scoreChallengeStep(before: WorldState, after: WorldState, action: WorldAction): RewardResult {
   const beforeTarget = nearestObject(before);
   const afterTarget = nearestObject(after);
 
@@ -683,7 +689,7 @@ function createChallengeScenario(
   };
 }
 
-function createChallengeWorldState(scenario: ChallengeScenario): WorldState {
+export function createChallengeWorldState(scenario: ChallengeScenario): WorldState {
   return {
     width: scenario.width,
     height: scenario.height,
@@ -698,7 +704,7 @@ function createChallengeWorldState(scenario: ChallengeScenario): WorldState {
   };
 }
 
-function observeChallengeWorld(
+export function observeChallengeWorld(
   state: WorldState,
   observationDropout: number,
   rng: SeededRandom
@@ -753,7 +759,7 @@ function mapChallengeObservationToSensors(observation: ChallengeRawObservation):
   };
 }
 
-function stepChallengeWorld(state: WorldState, action: WorldAction): WorldState {
+export function stepChallengeWorld(state: WorldState, action: WorldAction): WorldState {
   const next: WorldState = {
     width: state.width,
     height: state.height,
@@ -798,14 +804,14 @@ function objectDistance(state: WorldState, object: WorldObject): number {
   return Math.abs(object.position.x - state.agent.position.x) + Math.abs(object.position.y - state.agent.position.y);
 }
 
-function activeMotorIds(network: LearningNetwork): string[] {
+export function activeMotorIds(network: LearningNetwork): string[] {
   return network.neurons
     .filter((neuron) => neuron.role === "motor" && neuron.outputSignal !== 0)
     .map((neuron) => neuron.id)
     .sort();
 }
 
-function countLearningEvents(episode: ChallengeEpisodeTrace): {
+export function countLearningEvents(episode: ChallengeEpisodeTrace): {
   rewardUpdateCount: number;
   supervisedUpdateCount: number;
   captureUpdateCount: number;
@@ -834,7 +840,7 @@ function centerPosition(): GridPosition {
   };
 }
 
-function shuffleScenarios(scenarios: ChallengeScenario[], seed: number): ChallengeScenario[] {
+export function shuffleScenarios(scenarios: ChallengeScenario[], seed: number): ChallengeScenario[] {
   const rng = new SeededRandom(seed);
   const shuffled = [...scenarios];
 
