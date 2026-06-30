@@ -53,7 +53,14 @@ export function updateEligibility(
     // fastLearningRate scaling is unchanged. stdpLtpRate/stdpLtdRate act as
     // LTP/LTD relative-asymmetry factors (default 1.0 each), NOT tiny rate constants.
     const bapWeight = synapse.effectSign * Math.abs(synapse.effectiveWeight);
-    const ltpElig = config.stdpLtpRate * synapse.preTrace * postActive * bapWeight;
+    // LTP gated on preActive (current-step pre firing): without it, a motor that
+    // keeps firing while the interneuron is silent accrues LTP from preTrace
+    // residual alone — single-sided accumulation that suppresses the motor pathway
+    // rewardOnly needs. preTrace still carries the cross-step "pre fired recently"
+    // credit; preActive just prevents LTP when pre did NOT fire this step at all.
+    // LTD stays gated on preActive too (post-before-pre needs pre to fire now to
+    // detect that post fired earlier). No-sensory steps (preActive=0) learn nothing.
+    const ltpElig = config.stdpLtpRate * synapse.preTrace * postActive * preActive * bapWeight;
     const ltdElig = config.stdpLtdRate * synapse.postTrace * preActive * bapWeight;
     synapse.eligibilityTrace =
       synapse.eligibilityTrace * config.eligibilityDecay + ltpElig - ltdElig;
