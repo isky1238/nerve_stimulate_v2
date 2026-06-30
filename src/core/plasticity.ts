@@ -34,14 +34,15 @@ export function updateEligibility(
     // time window: at the moment of a post spike, preTrace holds the memory of
     // recent pre activity (pre-before-post → LTP); at a pre spike, postTrace holds
     // the memory of recent post activity (post-before-pre → LTD).
-    // Steady-state normalized: a constantly-firing neuron's trace saturates at
-    // 1/(1-traceDecay); we divide by that so the trace expresses "recent activity
-    // rate" in [0,1] regardless of traceDecay. Without this, a motor that fires
-    // every step saturates postTrace to ~6.7 (traceDecay=0.85) and the LTD term
-    // dominates LTP — collapsing all learning.
-    const traceSteadyState = 1 / (1 - config.traceDecay);
-    synapse.preTrace = (synapse.preTrace * config.traceDecay + preActive) / traceSteadyState;
-    synapse.postTrace = (synapse.postTrace * config.traceDecay + postActive) / traceSteadyState;
+    // Standard EMA normalized to [0,1]: trace = trace*decay + active*(1-decay).
+    // Steady-state under constant firing is exactly 1.0 and the effective time
+    // constant is ~1/(1-decay) steps. (A previous version divided the raw
+    // accumulator trace*decay+active by 1/(1-decay) — that was a bug: it also
+    // scaled the decay rate by (1-decay), collapsing the time constant from ~6.7
+    // steps to ~1.1 steps and erasing the cross-step memory STDP needs for LTD.)
+    const traceAlpha = 1 - config.traceDecay;
+    synapse.preTrace = synapse.preTrace * config.traceDecay + preActive * traceAlpha;
+    synapse.postTrace = synapse.postTrace * config.traceDecay + postActive * traceAlpha;
 
     // BAP-weighted STDP eligibility. bapWeight keeps the synapse's effectSign
     // (so inhibitory synapses keep negative credit) and scales by |effectiveWeight|
