@@ -42,6 +42,16 @@ export interface ChallengeRewardResult {
   distanceDelta: number;
 }
 
+export interface ChallengeAversiveTag {
+  present: boolean;
+  badOutcome: boolean;
+  goodAvoidance: boolean;
+  intensity: number;
+  distanceDelta: number;
+  activeToxinSensors: string[];
+  reason: string;
+}
+
 export const CHALLENGE_WIDTH = 7;
 export const CHALLENGE_HEIGHT = 7;
 export const DEFAULT_CHALLENGE_MAX_STEPS = 12;
@@ -308,6 +318,55 @@ export function scoreChallengeStep(before: WorldState, after: WorldState, action
   };
 }
 
+export function neutralChallengeAversiveTag(): ChallengeAversiveTag {
+  return {
+    present: false,
+    badOutcome: false,
+    goodAvoidance: false,
+    intensity: 0,
+    distanceDelta: 0,
+    activeToxinSensors: [],
+    reason: "no-visible-toxin"
+  };
+}
+
+export function deriveChallengeAversiveTag(
+  observation: ChallengeRawObservation,
+  reward: ChallengeRewardResult,
+  action: WorldAction,
+  badOutcomeThreshold: number
+): ChallengeAversiveTag {
+  const toxinObjects = observation.visibleObjects.filter((object) => object.kind === "toxin");
+
+  if (toxinObjects.length === 0) {
+    return neutralChallengeAversiveTag();
+  }
+
+  const activeToxinSensors = toxinObjects
+    .map((object) => `toxin${object.dx < 0 ? "Left" : "Right"}`)
+    .sort();
+  const threshold = Math.max(0, badOutcomeThreshold);
+  const movedTowardToxin = reward.distanceDelta > threshold;
+  const movedAwayFromToxin = reward.distanceDelta < -threshold;
+  const badOutcome =
+    reward.terminalReason === "toxin-contact" ||
+    reward.terminalReason === "conflict" ||
+    action === "noop" ||
+    movedTowardToxin;
+  const goodAvoidance = reward.terminalReason === "toxin-avoided" || movedAwayFromToxin;
+  const intensity = badOutcome || goodAvoidance ? 1 : 0;
+
+  return {
+    present: true,
+    badOutcome,
+    goodAvoidance,
+    intensity,
+    distanceDelta: reward.distanceDelta,
+    activeToxinSensors,
+    reason: aversiveReason(reward, action, movedTowardToxin, movedAwayFromToxin)
+  };
+}
+
 export function shuffleScenarios(scenarios: ChallengeScenario[], seed: number): ChallengeScenario[] {
   const rng = new SeededRandom(seed);
   const shuffled = [...scenarios];
@@ -360,6 +419,27 @@ function shapedReward(kind: WorldObjectKind, distanceDelta: number, action: Worl
   }
 
   return distanceDelta < 0 ? 0.1 : -0.1;
+}
+
+function aversiveReason(
+  reward: ChallengeRewardResult,
+  action: WorldAction,
+  movedTowardToxin: boolean,
+  movedAwayFromToxin: boolean
+): string {
+  if (reward.terminalReason === "toxin-contact" || reward.terminalReason === "conflict" || reward.terminalReason === "toxin-avoided") {
+    return reward.terminalReason;
+  }
+  if (action === "noop") {
+    return "toxin-visible-noop";
+  }
+  if (movedTowardToxin) {
+    return "moved-toward-toxin";
+  }
+  if (movedAwayFromToxin) {
+    return "moved-away-from-toxin";
+  }
+  return "toxin-visible-neutral";
 }
 
 function nearestObject(state: WorldState): WorldObject | null {

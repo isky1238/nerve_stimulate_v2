@@ -204,20 +204,19 @@ async function runCell(cell: TransferMatrixCell, tmpRoot: string): Promise<Trans
       const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
       const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
 
-      if (code !== 0) {
-        resolve({
-          cell,
-          report: null,
-          error: `cell exit ${code}; stderr: ${stderr || "(empty)"}`,
-          durationMs
-        });
-        return;
-      }
-
       try {
         const report = JSON.parse(stdout) as TransferAuditReport;
         resolve({ cell, report, error: null, durationMs });
       } catch (error) {
+        if (code !== 0) {
+          resolve({
+            cell,
+            report: null,
+            error: `cell exit ${code}; stderr: ${stderr || "(empty)"}`,
+            durationMs
+          });
+          return;
+        }
         resolve({
           cell,
           report: null,

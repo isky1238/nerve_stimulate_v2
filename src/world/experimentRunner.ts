@@ -118,6 +118,11 @@ export function runExperimentWithRunner(
         observationDropout,
         reverseMapping,
         rewardAdvantageBaselineAlpha: config.rewardAdvantageBaselineAlpha,
+        aversiveTagStrategy: config.aversiveTagStrategy,
+        aversiveTagGain: config.aversiveTagGain,
+        aversiveAvoidanceBonus: config.aversiveAvoidanceBonus,
+        aversiveDepotentiationRate: config.aversiveDepotentiationRate,
+        aversiveBadOutcomeThreshold: config.aversiveBadOutcomeThreshold,
         explorationStrategy: config.explorationStrategy,
         explorationEpsilon: config.explorationEpsilon
       },

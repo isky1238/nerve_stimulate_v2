@@ -95,6 +95,11 @@ function challengeMetrics(
     maxSteps: result.trace.config.maxSteps,
     observationDropout: result.trace.config.observationDropout,
     rewardAdvantageBaselineAlpha: result.trace.config.rewardAdvantageBaselineAlpha,
+    aversiveTagStrategy: result.trace.config.aversiveTagStrategy,
+    aversiveTagGain: result.trace.config.aversiveTagGain,
+    aversiveAvoidanceBonus: result.trace.config.aversiveAvoidanceBonus,
+    aversiveDepotentiationRate: result.trace.config.aversiveDepotentiationRate,
+    aversiveBadOutcomeThreshold: result.trace.config.aversiveBadOutcomeThreshold,
     explorationStrategy: result.trace.config.explorationStrategy,
     explorationEpsilon: result.trace.config.explorationEpsilon,
     claimBoundary: "pretrained candidate only; not proof of real-world autonomous learning"

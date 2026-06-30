@@ -11,6 +11,8 @@ export interface TopologyNeuronBlueprint {
   role: NeuronRole;
   position: Position;
   branchCount?: number;
+  maxInputSlots?: number;
+  maxOutputSlots?: number;
 }
 
 export interface TopologySynapseBlueprint {
@@ -30,19 +32,30 @@ export interface OfflineLearningTopologyBlueprint {
   synapses: readonly TopologySynapseBlueprint[];
 }
 
-const SENSORY_NODES: TopologyNeuronBlueprint[] = [
-  { id: "foodLeft", role: "sensory", position: { x: 0, y: 0 } },
-  { id: "foodRight", role: "sensory", position: { x: 0, y: 1 } },
-  { id: "toxinLeft", role: "sensory", position: { x: 0, y: 2 } },
-  { id: "toxinRight", role: "sensory", position: { x: 0, y: 3 } }
-];
+export interface ScaledTopologyOptions {
+  interneuronCopiesPerSensor: number;
+  normalizeReadoutByCopies?: boolean;
+}
 
-const INTERNEURON_NODES: TopologyNeuronBlueprint[] = [
-  { id: "iFoodLeft", role: "interneuron", position: { x: 1, y: 0 }, branchCount: 1 },
-  { id: "iFoodRight", role: "interneuron", position: { x: 1, y: 1 }, branchCount: 1 },
-  { id: "iToxinLeft", role: "interneuron", position: { x: 1, y: 2 }, branchCount: 1 },
-  { id: "iToxinRight", role: "interneuron", position: { x: 1, y: 3 }, branchCount: 1 }
-];
+const CHANNELS = [
+  { sensoryId: "foodLeft", interId: "iFoodLeft", y: 0 },
+  { sensoryId: "foodRight", interId: "iFoodRight", y: 1 },
+  { sensoryId: "toxinLeft", interId: "iToxinLeft", y: 2 },
+  { sensoryId: "toxinRight", interId: "iToxinRight", y: 3 }
+] as const;
+
+const SENSORY_NODES: TopologyNeuronBlueprint[] = CHANNELS.map((channel) => ({
+  id: channel.sensoryId,
+  role: "sensory",
+  position: { x: 0, y: channel.y }
+}));
+
+const INTERNEURON_NODES: TopologyNeuronBlueprint[] = CHANNELS.map((channel) => ({
+  id: channel.interId,
+  role: "interneuron",
+  position: { x: 1, y: channel.y },
+  branchCount: 1
+}));
 
 const MOTOR_NODES: TopologyNeuronBlueprint[] = [
   { id: "leftMotor", role: "motor", position: { x: 2, y: 0 }, branchCount: 1 },
@@ -77,6 +90,73 @@ export const offlineLearningTopologyBlueprint: OfflineLearningTopologyBlueprint 
   ])
 });
 
+export function createScaledOfflineLearningTopologyBlueprint(
+  options: ScaledTopologyOptions
+): OfflineLearningTopologyBlueprint {
+  const copies = Math.max(1, Math.floor(options.interneuronCopiesPerSensor));
+
+  if (copies === 1) {
+    return offlineLearningTopologyBlueprint;
+  }
+
+  const readoutFastWeight = options.normalizeReadoutByCopies === false ? 0.35 : 0.35 / copies;
+  const sensoryNodes: TopologyNeuronBlueprint[] = CHANNELS.map((channel) => ({
+    id: channel.sensoryId,
+    role: "sensory",
+    position: { x: 0, y: channel.y },
+    maxOutputSlots: copies
+  }));
+  const interneuronNodes: TopologyNeuronBlueprint[] = CHANNELS.flatMap((channel) =>
+    Array.from({ length: copies }, (_, index): TopologyNeuronBlueprint => ({
+      id: scaledInterneuronId(channel.interId, index),
+      role: "interneuron",
+      position: { x: 1, y: channel.y + index / Math.max(10, copies * 2) },
+      branchCount: 1,
+      maxInputSlots: 1,
+      maxOutputSlots: MOTOR_NODES.length
+    }))
+  );
+  const motorNodes: TopologyNeuronBlueprint[] = MOTOR_NODES.map((motor) => ({
+    ...motor,
+    maxInputSlots: CHANNELS.length * copies
+  }));
+  const synapses: TopologySynapseBlueprint[] = [
+    ...CHANNELS.flatMap((channel) =>
+      Array.from({ length: copies }, (_, index): TopologySynapseBlueprint => ({
+        kind: "structuralStem",
+        preNeuronId: channel.sensoryId,
+        postNeuronId: scaledInterneuronId(channel.interId, index),
+        postBranchIndex: 0,
+        fastWeight: 0,
+        stableWeight: 1.1,
+        decayProtected: true
+      }))
+    ),
+    ...interneuronNodes.flatMap((inter): TopologySynapseBlueprint[] =>
+      MOTOR_NODES.map((motor) => ({
+        kind: "plasticReadout",
+        preNeuronId: inter.id,
+        postNeuronId: motor.id,
+        postBranchIndex: 0,
+        fastWeight: readoutFastWeight,
+        stableWeight: 0,
+        decayProtected: false
+      }))
+    )
+  ];
+
+  return Object.freeze({
+    sensoryNodes: Object.freeze(sensoryNodes),
+    interneuronNodes: Object.freeze(interneuronNodes),
+    motorNodes: Object.freeze(motorNodes),
+    synapses: Object.freeze(synapses)
+  });
+}
+
+function scaledInterneuronId(baseId: string, copyIndex: number): string {
+  return copyIndex === 0 ? baseId : `${baseId}_copy${copyIndex + 1}`;
+}
+
 export function createLearningNetworkFromBlueprint(
   blueprint: OfflineLearningTopologyBlueprint,
   config: ModelConfig
@@ -91,7 +171,9 @@ export function createLearningNetworkFromBlueprint(
         id: node.id,
         role: node.role,
         position: node.position,
-        branchCount: node.branchCount
+        branchCount: node.branchCount,
+        maxInputSlots: node.maxInputSlots,
+        maxOutputSlots: node.maxOutputSlots
       },
       config
     )

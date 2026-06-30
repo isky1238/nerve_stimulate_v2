@@ -2,6 +2,19 @@ import { ModelConfig } from "../config/newModelConfig";
 import { Neuron } from "./neuron";
 import { clampMagnitude, ema, isActiveSignal } from "./signal";
 import { Synapse, isConductingSynapse, refreshSynapseWeight } from "./synapse";
+import {
+  AversiveLearningTag,
+  computeAversiveStableDepotentiationDelta,
+  computeRewardFastDelta,
+  computeStableCaptureAmount,
+  computeStableDepotentiationDelta,
+  computeStdpEligibilityDelta,
+  computeSupervisedFastDelta,
+  nextActivityTrace,
+  nextEligibilityTrace,
+  positiveEligibilityScale,
+  shouldApplyAversiveStableDepotentiation
+} from "./plasticityMechanisms";
 
 export interface LearningEvent {
   synapseId: string;
@@ -29,41 +42,25 @@ export function updateEligibility(
 
     const preActive = isActiveSignal(pre.outputSignal) ? 1 : 0;
     const postActive = post.spike ? 1 : 0;
-    // preTrace / postTrace are decaying accumulators of recent pre / post activity.
-    // They were previously computed but unused (dead code). They now carry the STDP
-    // time window: at the moment of a post spike, preTrace holds the memory of
-    // recent pre activity (pre-before-post → LTP); at a pre spike, postTrace holds
-    // the memory of recent post activity (post-before-pre → LTD).
-    // Standard EMA normalized to [0,1]: trace = trace*decay + active*(1-decay).
-    // Steady-state under constant firing is exactly 1.0 and the effective time
-    // constant is ~1/(1-decay) steps. (A previous version divided the raw
-    // accumulator trace*decay+active by 1/(1-decay) — that was a bug: it also
-    // scaled the decay rate by (1-decay), collapsing the time constant from ~6.7
-    // steps to ~1.1 steps and erasing the cross-step memory STDP needs for LTD.)
-    const traceAlpha = 1 - config.traceDecay;
-    synapse.preTrace = synapse.preTrace * config.traceDecay + preActive * traceAlpha;
-    synapse.postTrace = synapse.postTrace * config.traceDecay + postActive * traceAlpha;
+    synapse.preTrace = nextActivityTrace(synapse.preTrace, preActive, config.traceDecay);
+    synapse.postTrace = nextActivityTrace(synapse.postTrace, postActive, config.traceDecay);
 
-    // BAP-weighted STDP eligibility. bapWeight keeps the synapse's effectSign
-    // (so inhibitory synapses keep negative credit) and scales by |effectiveWeight|
-    // — the "how much did this synapse drive the post" contribution that pure binary
-    // coactivity discarded. eligibilityTrace is now a SIGNED scalar
-    // (positive = LTP bias, negative = LTD bias), peaking at ~|effectiveWeight|
-    // (same order as the old coactivity*sign(eff)=±1 baseline) so downstream
-    // fastLearningRate scaling is unchanged. stdpLtpRate/stdpLtdRate act as
-    // LTP/LTD relative-asymmetry factors (default 1.0 each), NOT tiny rate constants.
-    const bapWeight = synapse.effectSign * Math.abs(synapse.effectiveWeight);
-    // LTP gated on preActive (current-step pre firing): without it, a motor that
-    // keeps firing while the interneuron is silent accrues LTP from preTrace
-    // residual alone — single-sided accumulation that suppresses the motor pathway
-    // rewardOnly needs. preTrace still carries the cross-step "pre fired recently"
-    // credit; preActive just prevents LTP when pre did NOT fire this step at all.
-    // LTD stays gated on preActive too (post-before-pre needs pre to fire now to
-    // detect that post fired earlier). No-sensory steps (preActive=0) learn nothing.
-    const ltpElig = config.stdpLtpRate * synapse.preTrace * postActive * preActive * bapWeight;
-    const ltdElig = config.stdpLtdRate * synapse.postTrace * preActive * bapWeight;
-    synapse.eligibilityTrace =
-      synapse.eligibilityTrace * config.eligibilityDecay + ltpElig - ltdElig;
+    const stdp = computeStdpEligibilityDelta(
+      {
+        preTrace: synapse.preTrace,
+        postTrace: synapse.postTrace,
+        preActive,
+        postActive,
+        effectSign: synapse.effectSign,
+        effectiveWeight: synapse.effectiveWeight
+      },
+      config
+    );
+    synapse.eligibilityTrace = nextEligibilityTrace(
+      synapse.eligibilityTrace,
+      stdp.eligibilityDelta,
+      config
+    );
 
     // recentContribution still tracks absolute contribution magnitude (used by
     // captureStableWeights gates). BAP weighting changes its meaning slightly
@@ -115,7 +112,7 @@ export function normalizeEligibility(
     if (ltpSum <= 1e-12) {
       continue;
     }
-    const scale = 1 / ltpSum;
+    const scale = positiveEligibilityScale(ltpSum);
     for (const synapse of incoming) {
       if (synapse.eligibilityTrace > 0) {
         synapse.eligibilityTrace *= scale;
@@ -142,11 +139,13 @@ export function applyRewardLearning(
     const branch = post?.branches.find((candidate) => candidate.id === synapse.postBranchId);
     const plasticityGate = branch?.plasticityGate ?? 1;
     const before = synapse.fastWeight;
-    // Phase 2: modulator (reward-derived intensity) composes with the binary
-    // inhibition-freeze plasticityGate. rewardSignal (advantage) carries the sign;
-    // signed eligibilityTrace carries the LTP/LTD credit. Their product gives the
-    // four-quadrant update; modulator scales how strongly this step learns at all.
-    const delta = config.fastLearningRate * rewardSignal * synapse.eligibilityTrace * plasticityGate * modulator;
+    const delta = computeRewardFastDelta(
+      rewardSignal,
+      synapse.eligibilityTrace,
+      plasticityGate,
+      modulator,
+      config
+    );
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
     refreshSynapseWeight(synapse, config);
 
@@ -156,6 +155,60 @@ export function applyRewardLearning(
         kind: "reward",
         deltaFast: synapse.fastWeight - before,
         deltaStable: 0
+      });
+    }
+  }
+
+  return events;
+}
+
+export function applyAversiveStableDepotentiation(
+  synapses: Synapse[],
+  neuronsById: Map<string, Neuron>,
+  aversiveTag: AversiveLearningTag | undefined,
+  config: ModelConfig
+): LearningEvent[] {
+  if (!shouldApplyAversiveStableDepotentiation(aversiveTag, config)) {
+    return [];
+  }
+
+  const events: LearningEvent[] = [];
+  const intensity = aversiveTag?.intensity ?? 0;
+
+  for (const synapse of synapses) {
+    if (!isConductingSynapse(synapse) || synapse.stableWeight <= 0 || synapse.eligibilityTrace === 0) {
+      continue;
+    }
+
+    const pre = neuronsById.get(synapse.preNeuronId);
+    const post = neuronsById.get(synapse.postNeuronId);
+
+    if (!pre || !post || post.role !== "motor" || !isActiveSignal(pre.outputSignal) || !isActiveSignal(post.outputSignal)) {
+      continue;
+    }
+
+    const branch = post.branches.find((candidate) => candidate.id === synapse.postBranchId);
+    const plasticityGate = branch?.plasticityGate ?? 1;
+    const stableBefore = synapse.stableWeight;
+    const stableDelta = computeAversiveStableDepotentiationDelta(
+      synapse.eligibilityTrace,
+      plasticityGate,
+      intensity,
+      config
+    );
+
+    synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
+    if (synapse.stableWeight < config.stableThreshold) {
+      synapse.state = "active";
+    }
+    refreshSynapseWeight(synapse, config);
+
+    if (synapse.stableWeight !== stableBefore) {
+      events.push({
+        synapseId: synapse.id,
+        kind: "reward",
+        deltaFast: 0,
+        deltaStable: synapse.stableWeight - stableBefore
       });
     }
   }
@@ -190,23 +243,18 @@ export function applySupervisedMotorLearning(
     const isTarget = post.id === targetMotorId;
     const wasWronglyActive = !isTarget && activeMotorIds.has(post.id);
     const before = synapse.fastWeight;
-    // modulator is 1 for supervised (explicit target), kept in the formula for
-    // symmetry with rewardOnly and future reward-driven supervised variants.
-    const delta = isTarget
-      ? config.supervisedLearningRate * plasticityGate * modulator
-      : -config.supervisedLearningRate * (wasWronglyActive ? 1 : 0.7) * plasticityGate * modulator;
+    const delta = computeSupervisedFastDelta(isTarget, wasWronglyActive, plasticityGate, modulator, config);
 
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
 
     if (wasWronglyActive && synapse.state === "stable") {
-      // Stable depotentiation: trigger on wasWronglyActive (the motor fired when it
-      // shouldn't have) — pre activity is already guaranteed by the isActiveSignal
-      // gate above, so this synapse contributed to the wrong firing. Under STDP the
-      // eligibilityTrace is signed (some wrong synapses go negative via post-before-pre
-      // LTD); the depotentiation magnitude uses |eligibilityTrace| so the sign cannot
-      // shield a wrong-direction stable synapse from depotentiation.
       const stableBefore = synapse.stableWeight;
-      const stableDelta = -config.depotentiationRate * Math.abs(synapse.eligibilityTrace) * plasticityGate * modulator;
+      const stableDelta = computeStableDepotentiationDelta(
+        synapse.eligibilityTrace,
+        plasticityGate,
+        modulator,
+        config
+      );
       synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
       if (synapse.stableWeight < config.stableThreshold) {
         synapse.state = "active";
@@ -296,7 +344,7 @@ export function captureStableWeights(synapses: Synapse[], config: ModelConfig): 
 
     const beforeFast = synapse.fastWeight;
     const beforeStable = synapse.stableWeight;
-    const captured = synapse.fastWeight * config.stableCaptureRate;
+    const captured = computeStableCaptureAmount(synapse.fastWeight, config);
     synapse.stableWeight = clampMagnitude(synapse.stableWeight + captured, 0, config.maxWeight);
     synapse.fastWeight = clampMagnitude(synapse.fastWeight - captured, 0, config.maxWeight);
     synapse.stabilityScore = ema(synapse.stabilityScore, 1, config.emaAlpha);

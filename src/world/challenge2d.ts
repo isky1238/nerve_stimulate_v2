@@ -6,6 +6,7 @@ import {
   applyMaintenanceDecayAndCapture,
   applyRewardOutcomeLearning,
   applySupervisedMotorOutcomeLearning,
+  computeRewardOutcomeSignal,
   clearSensoryOutputs,
   forceExplorationMotor,
   propagateAndIntegrateRole,
@@ -19,11 +20,13 @@ import {
   blankChallengeScenario,
   CHALLENGE_HEIGHT,
   CHALLENGE_WIDTH,
+  ChallengeAversiveTag,
   ChallengeRawObservation,
   ChallengeScenario,
   ChallengeTerminalReason,
   createChallengeScenarios,
   createChallengeWorldState,
+  deriveChallengeAversiveTag,
   DEFAULT_CHALLENGE_MAX_STEPS,
   DEFAULT_EVAL_SEEDS,
   DEFAULT_TRAIN_SEEDS,
@@ -49,6 +52,7 @@ export {
   conflictChallengeScenario,
   createChallengeScenarios,
   createChallengeWorldState,
+  deriveChallengeAversiveTag,
   DEFAULT_CHALLENGE_MAX_STEPS,
   DEFAULT_EVAL_SEEDS,
   DEFAULT_TRAIN_SEEDS,
@@ -63,6 +67,7 @@ export {
 } from "./challengeTask";
 export type {
   ChallengeObservedObject,
+  ChallengeAversiveTag,
   ChallengeRawObservation,
   ChallengeScenario,
   ChallengeTerminalReason,
@@ -97,6 +102,8 @@ export interface ChallengeTraceStep {
   reward: number;
   rewardBaseline: number;
   rewardAdvantage: number;
+  rewardSignal: number;
+  aversiveTag?: ChallengeAversiveTag;
   distanceDelta: number;
   after: WorldState;
   terminalReason: ChallengeTerminalReason;
@@ -132,6 +139,11 @@ export interface ChallengeExperimentTrace {
     observationDropout: number;
     reverseMapping: boolean;
     rewardAdvantageBaselineAlpha: number;
+    aversiveTagStrategy: string;
+    aversiveTagGain: number;
+    aversiveAvoidanceBonus: number;
+    aversiveDepotentiationRate: number;
+    aversiveBadOutcomeThreshold: number;
     explorationStrategy: "conflictGated" | "epsilonGreedy";
     explorationEpsilon: number;
   };
@@ -263,12 +275,22 @@ export function runChallengeEpisode(
       options.learningEnabled && options.learningMode === "rewardOnly"
         ? reward.reward - rewardBaseline
         : reward.reward;
+    const aversiveTag = deriveChallengeAversiveTag(
+      rawObservation,
+      reward,
+      networkStep.executedAction,
+      config.aversiveBadOutcomeThreshold
+    );
+    const rewardSignal =
+      options.learningEnabled && options.learningMode === "rewardOnly"
+        ? computeRewardOutcomeSignal(rewardAdvantage, config, aversiveTag)
+        : rewardAdvantage;
     let rewardUpdates = 0;
     let captureUpdates = 0;
     let decayUpdates = 0;
 
     if (options.learningEnabled && options.learningMode === "rewardOnly") {
-      rewardUpdates = applyRewardOutcomeLearning(network, rewardAdvantage, config);
+      rewardUpdates = applyRewardOutcomeLearning(network, rewardAdvantage, config, aversiveTag);
       updateRewardAdvantageBaseline(options.rewardAdvantageState, reward.reward, config);
       const maintenance = applyMaintenanceDecayAndCapture(network, config);
       captureUpdates = maintenance.captureUpdates;
@@ -291,6 +313,8 @@ export function runChallengeEpisode(
       reward: reward.reward,
       rewardBaseline,
       rewardAdvantage,
+      rewardSignal,
+      aversiveTag,
       distanceDelta: reward.distanceDelta,
       after,
       terminalReason: reward.terminalReason,

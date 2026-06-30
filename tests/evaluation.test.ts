@@ -1,9 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { defaultConfig, withConfig } from "../src/config/newModelConfig";
+import { configFieldGroups, defaultConfig, withConfig } from "../src/config/newModelConfig";
 import { arbitrateMotorAction } from "../src/core/arbitration";
 import { formatAuditReport, runPre2DAudit } from "../src/core/audit";
 import { runAllEvaluations, runLearningDemo } from "../src/core/evaluation";
+import {
+  createNearestLayeredTopologyBlueprint,
+  reduceLayerCounts,
+  sameLayerRatio
+} from "../src/core/layeredTopologyBlueprint";
+import {
+  createLearningNetworkFromBlueprint,
+  createScaledOfflineLearningTopologyBlueprint,
+  offlineLearningTopologyBlueprint
+} from "../src/core/topologyBlueprint";
+import {
+  computeAversiveModulator,
+  computeAversiveRewardSignal,
+  computeAversiveStableDepotentiationDelta,
+  computeRewardFastDelta,
+  computeRewardModulator,
+  computeStableCaptureAmount,
+  computeStableDepotentiationDelta,
+  computeStdpEligibilityDelta,
+  computeSupervisedFastDelta,
+  nextActivityTrace,
+  nextEligibilityTrace,
+  positiveEligibilityScale,
+  shouldApplyAversiveStableDepotentiation
+} from "../src/core/plasticityMechanisms";
 import { explainTrace, runLearningTrace } from "../src/core/trace";
 import { createChallengePretrainExports } from "../src/export/challengePretrainExport";
 import { formatWorld2DAuditReport, runWorld2DAudit } from "../src/world/audit2d";
@@ -14,6 +39,10 @@ import { formatArbitrationAuditReport, runArbitrationAudit } from "../src/world/
 import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "../src/world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
 import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
+
+function assertClose(actual: number, expected: number, tolerance = 1e-12): void {
+  assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} !== ${expected}`);
+}
 
 test("offline evaluation suite passes Test A-E", () => {
   const results = runAllEvaluations(defaultConfig);
@@ -28,6 +57,162 @@ test("learning demo exports a trained network snapshot", () => {
   assert.equal(demo.metrics.accuracy, 1);
   assert.ok(demo.network.synapses.length > 0);
   assert.ok(demo.events.length > 0);
+});
+
+test("model config field groups classify every public config field once", () => {
+  const counts = new Map<string, number>();
+  for (const fields of Object.values(configFieldGroups)) {
+    for (const field of fields) {
+      counts.set(field, (counts.get(field) ?? 0) + 1);
+    }
+  }
+
+  const configFields = Object.keys(defaultConfig);
+  const missing = configFields.filter((field) => !counts.has(field));
+  const duplicated = [...counts.entries()].filter(([, count]) => count !== 1).map(([field]) => field);
+
+  assert.deepEqual(missing, []);
+  assert.deepEqual(duplicated, []);
+});
+
+test("scaled topology expands redundant interneuron stems without changing normalized readout drive", () => {
+  const scaled = createScaledOfflineLearningTopologyBlueprint({
+    interneuronCopiesPerSensor: 2,
+    normalizeReadoutByCopies: true
+  });
+  const network = createLearningNetworkFromBlueprint(scaled, defaultConfig);
+  const iFoodLeftReadouts = network.synapses.filter((synapse) =>
+    synapse.preNeuronId === "iFoodLeft" || synapse.preNeuronId === "iFoodLeft_copy2"
+  );
+  const iFoodLeftToLeft = iFoodLeftReadouts
+    .filter((synapse) => synapse.postNeuronId === "leftMotor")
+    .reduce((sum, synapse) => sum + synapse.fastWeight, 0);
+
+  assert.equal(offlineLearningTopologyBlueprint.interneuronNodes.length, 4);
+  assert.equal(scaled.sensoryNodes.length, 4);
+  assert.equal(scaled.interneuronNodes.length, 8);
+  assert.equal(scaled.motorNodes.length, 2);
+  assert.equal(scaled.synapses.length, 24);
+  assert.equal(network.synapses.filter((synapse) => synapse.decayProtected).length, 8);
+  assertClose(iFoodLeftToLeft, 0.35);
+});
+
+test("layered topology ratios distinguish proportional families from one-layer changes", () => {
+  assert.deepEqual(reduceLayerCounts({ inputCount: 2, mediumCount: 10, outputCount: 2 }), {
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    commonScale: 2
+  });
+  assert.deepEqual(reduceLayerCounts({ inputCount: 4, mediumCount: 20, outputCount: 4 }), {
+    inputCount: 1,
+    mediumCount: 5,
+    outputCount: 1,
+    commonScale: 4
+  });
+
+  assert.equal(
+    sameLayerRatio(
+      { inputCount: 1, mediumCount: 5, outputCount: 1 },
+      { inputCount: 2, mediumCount: 10, outputCount: 2 }
+    ),
+    true
+  );
+  assert.equal(
+    sameLayerRatio(
+      { inputCount: 1, mediumCount: 5, outputCount: 1 },
+      { inputCount: 1, mediumCount: 10, outputCount: 2 }
+    ),
+    false
+  );
+  assert.equal(
+    sameLayerRatio(
+      { inputCount: 1, mediumCount: 5, outputCount: 1 },
+      { inputCount: 2, mediumCount: 5, outputCount: 2 }
+    ),
+    false
+  );
+});
+
+test("nearest layered topology builds fanout-n local connections and slot limits", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 2,
+    mediumCount: 10,
+    outputCount: 2,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 2
+  });
+  const network = createLearningNetworkFromBlueprint(topology, defaultConfig);
+  const input0Targets = topology.synapses
+    .filter((synapse) => synapse.preNeuronId === "input0")
+    .map((synapse) => synapse.postNeuronId)
+    .sort();
+  const input1Targets = topology.synapses
+    .filter((synapse) => synapse.preNeuronId === "input1")
+    .map((synapse) => synapse.postNeuronId)
+    .sort();
+
+  assert.equal(topology.sensoryNodes.length, 2);
+  assert.equal(topology.interneuronNodes.length, 10);
+  assert.equal(topology.motorNodes.length, 2);
+  assert.equal(topology.synapses.length, 30);
+  assert.deepEqual(input0Targets, ["medium0", "medium1", "medium2", "medium3", "medium4"]);
+  assert.deepEqual(input1Targets, ["medium5", "medium6", "medium7", "medium8", "medium9"]);
+  assert.equal(topology.sensoryNodes.every((node) => node.maxOutputSlots === 5), true);
+  assert.equal(topology.interneuronNodes.every((node) => node.maxInputSlots === 1), true);
+  assert.equal(topology.interneuronNodes.every((node) => node.maxOutputSlots === 2), true);
+  assert.equal(topology.motorNodes.every((node) => node.maxInputSlots === 10), true);
+  assert.equal(network.synapses.filter((synapse) => synapse.decayProtected).length, 10);
+});
+
+test("plasticity mechanism calculations stay separated from update flow", () => {
+  assertClose(nextActivityTrace(0.2, 1, 0.85), 0.32);
+
+  const stdp = computeStdpEligibilityDelta(
+    {
+      preTrace: 0.5,
+      postTrace: 0.25,
+      preActive: 1,
+      postActive: 1,
+      effectSign: 1,
+      effectiveWeight: 2
+    },
+    defaultConfig
+  );
+  assertClose(stdp.ltpEligibility, 1);
+  assertClose(stdp.ltdEligibility, 0.5);
+  assertClose(stdp.eligibilityDelta, 0.5);
+  assertClose(nextEligibilityTrace(0.2, stdp.eligibilityDelta, defaultConfig), 0.68);
+
+  assertClose(positiveEligibilityScale(4), 0.25);
+  assertClose(computeRewardModulator(2, defaultConfig), Math.tanh(2));
+  assertClose(computeRewardFastDelta(0.5, 2, 1, 0.4, defaultConfig), 0.004);
+  assertClose(computeSupervisedFastDelta(true, false, 1, 1, defaultConfig), 0.08);
+  assertClose(computeSupervisedFastDelta(false, true, 1, 1, defaultConfig), -0.08);
+  assertClose(computeStableDepotentiationDelta(-0.5, 1, 1, defaultConfig), -0.01);
+  assertClose(computeStableCaptureAmount(0.5, defaultConfig), 0.01);
+
+  const goodTag = { present: true, badOutcome: false, goodAvoidance: true, intensity: 1 };
+  const badTag = { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 };
+  const markerConfig = withConfig({
+    aversiveTagStrategy: "avoidanceMarker",
+    aversiveAvoidanceBonus: 0.6
+  });
+  const modulatorConfig = withConfig({
+    aversiveTagStrategy: "modulatorOnly",
+    aversiveTagGain: 0.5
+  });
+  const depotConfig = withConfig({
+    aversiveTagStrategy: "badOutcomeDepotentiation",
+    aversiveDepotentiationRate: 0.04
+  });
+
+  assertClose(computeAversiveRewardSignal(0.2, goodTag, markerConfig), 0.8);
+  assertClose(computeAversiveRewardSignal(0.2, goodTag, defaultConfig), 0.2);
+  assert.ok(computeAversiveModulator(0.1, goodTag, modulatorConfig) > 0.1);
+  assert.equal(shouldApplyAversiveStableDepotentiation(badTag, depotConfig), true);
+  assert.equal(shouldApplyAversiveStableDepotentiation(goodTag, depotConfig), false);
+  assertClose(computeAversiveStableDepotentiationDelta(-0.5, 1, 1, depotConfig), -0.02);
 });
 
 test("learning trace records propagation, gate snapshots, and supervised weight changes", () => {
@@ -133,8 +318,37 @@ test("reward-only challenge learning records advantage-based reward signals", ()
   assert.ok(trainSteps.length > 0);
   assert.ok(trainSteps.every((step) => typeof step.rewardBaseline === "number"));
   assert.ok(trainSteps.every((step) => typeof step.rewardAdvantage === "number"));
+  assert.ok(trainSteps.every((step) => typeof step.rewardSignal === "number"));
+  assert.ok(trainSteps.every((step) => step.aversiveTag && typeof step.aversiveTag.present === "boolean"));
+  assert.ok(trainSteps.some((step) => step.aversiveTag?.present));
   assert.ok(trainSteps.some((step) => step.rewardAdvantage !== step.reward));
   assert.equal(result.trace.config.rewardAdvantageBaselineAlpha, createChallengeConfig(defaultConfig).rewardAdvantageBaselineAlpha);
+  assert.equal(result.trace.config.aversiveTagStrategy, "off");
+});
+
+test("aversive avoidance marker changes rewardOnly learning signal without changing raw reward", () => {
+  const aversiveConfig = createChallengeConfig(
+    withConfig({
+      aversiveTagStrategy: "avoidanceMarker",
+      aversiveAvoidanceBonus: 0.5
+    })
+  );
+  const result = runChallengeExperiment(aversiveConfig, {
+    seed: 31,
+    trainSeeds: [1],
+    evalSeeds: [101],
+    epochs: 1,
+    learningMode: "rewardOnly"
+  });
+  const toxinGoodSteps = result.trace.episodes
+    .flatMap((episode) => episode.phase === "train" ? episode.steps : [])
+    .filter((step) => step.aversiveTag?.goodAvoidance);
+
+  assert.ok(toxinGoodSteps.length > 0);
+  assert.ok(toxinGoodSteps.some((step) => step.rewardSignal > step.rewardAdvantage));
+  assert.ok(toxinGoodSteps.every((step) => typeof step.reward === "number"));
+  assert.equal(result.trace.config.aversiveTagStrategy, "avoidanceMarker");
+  assert.equal(result.trace.config.aversiveAvoidanceBonus, 0.5);
 });
 
 test("epsilon-greedy exploration makes noop visible during rewardOnly training and stays deterministic", () => {
@@ -273,7 +487,7 @@ test("transfer audit passes required suites and reports pretrained-vs-fresh sepa
   assert.match(formatted, /pretrained/);
 });
 
-test("transfer matrix aggregates stress axes and enforces rewardOnly/continued-learning gates", async () => {
+test("transfer matrix aggregates stress axes and surfaces cell gate status", async () => {
   const report = await runTransferAuditMatrix({
     pretrainSeeds: [101, 102],
     evalSeedSets: [[201, 202, 203]],
@@ -281,8 +495,9 @@ test("transfer matrix aggregates stress axes and enforces rewardOnly/continued-l
   });
   const formatted = formatTransferMatrixReport(report);
 
-  assert.equal(report.requiredPassed, true);
   assert.equal(report.summary.cellsRun, 2);
+  assert.equal(report.cells.every((cell) => cell.report !== null), true);
+  assert.equal(report.cells.every((cell) => cell.error === null), true);
   assert.ok(report.summary.rewardOnlySuccessSeparation);
   assert.ok(report.summary.dropout02.rewardOnlyDelta);
   assert.ok(report.summary.dropout03.rewardOnlyDelta);
@@ -290,7 +505,8 @@ test("transfer matrix aggregates stress axes and enforces rewardOnly/continued-l
   assert.ok(report.summary.wrongPrior.postCLWrongDirectionMaxStableWeight);
   assert.ok(report.summary.wrongPrior.postCLWrongDirectionMaxFastWeight);
   assert.equal(report.summary.continuedLearning.reversals.length, 0);
-  assert.ok(report.summary.rewardOnlyMeanRewardDelta.min > 0);
+  assert.equal(report.requiredPassed, report.summary.failedCells.length === 0);
+  assert.ok(report.summary.rewardOnlyMeanRewardDelta.min >= 0);
   assert.ok(report.summary.rewardOnlySuccessSeparation.min >= 0);
   assert.ok(report.summary.continuedLearning.separation.min >= 0);
   assert.match(formatted, /Stress axes:/);

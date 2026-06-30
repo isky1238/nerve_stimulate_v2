@@ -23,7 +23,11 @@
     "audit:transfer:matrix:multi": "npm run build && node dist/src/cli.js audit:transfer:matrix:multi",
     "audit:rewardonly:collapse": "npm run build && node dist/src/cli.js audit:rewardonly:collapse",
     "audit:rewardonly:challenge-collapse": "npm run build && node dist/src/cli.js audit:rewardonly:challenge-collapse",
-    "audit:rewardonly:longrange": "npm run build && node scripts/longrange_sweep.cjs"
+    "audit:rewardonly:longrange": "npm run build && node scripts/longrange_sweep.cjs",
+    "audit:rewardonly:natural-stim": "node scripts/natural_stim_probe.cjs",
+    "audit:rewardonly:weight-map": "node scripts/longrange_checkpoint_probe.cjs weights",
+    "audit:rewardonly:checkpoint-probe": "node scripts/longrange_checkpoint_probe.cjs path",
+    "audit:topology-family": "npm run build && node scripts/topology_family_probe.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.7",

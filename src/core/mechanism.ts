@@ -3,6 +3,7 @@ import { ActionDecision, WorldAction, targetMotorForAction } from "./arbitration
 import type { LearningNetwork } from "./evaluation";
 import { indexNeurons, integrateNeuron, NeuronRole, resetBranchInputs, resetNeuronRuntime, setSensoryOutput } from "./neuron";
 import {
+  applyAversiveStableDepotentiation,
   applyRewardLearning,
   applySupervisedMotorLearning,
   captureStableWeights,
@@ -10,6 +11,12 @@ import {
   normalizeEligibility,
   updateEligibility
 } from "./plasticity";
+import {
+  type AversiveLearningTag,
+  computeAversiveModulator,
+  computeAversiveRewardSignal,
+  computeRewardModulator
+} from "./plasticityMechanisms";
 import { SeededRandom } from "./random";
 import { propagateSynapses } from "./synapse";
 
@@ -74,30 +81,44 @@ export function updateNetworkEligibility(network: LearningNetwork, config: Model
   }
 }
 
-/**
- * Phase 2: reward-derived modulator. A global scalar in [0,1] expressing how much
- * the current reward advantage should gate plasticity. rewardOnly: advantage≈0 →
- * modulator≈0 (no learning signal); large |advantage| → 1 (full learning). The sign
- * is already carried by rewardSignal (advantage), so the modulator only encodes
- * intensity. supervised callers pass modulator=1 (explicit target, no modulation).
- */
-export function computeModulator(rewardAdvantage: number, config: ModelConfig): number {
-  return Math.tanh(Math.abs(rewardAdvantage) * config.modulatorGain);
+export { computeRewardModulator as computeModulator } from "./plasticityMechanisms";
+
+export type { AversiveLearningTag } from "./plasticityMechanisms";
+
+export function computeRewardOutcomeSignal(
+  rewardAdvantage: number,
+  config: ModelConfig,
+  aversiveTag?: AversiveLearningTag
+): number {
+  return computeAversiveRewardSignal(rewardAdvantage, aversiveTag, config);
+}
+
+export function computeRewardOutcomeModulator(
+  rewardSignal: number,
+  config: ModelConfig,
+  aversiveTag?: AversiveLearningTag
+): number {
+  return computeAversiveModulator(computeRewardModulator(rewardSignal, config), aversiveTag, config);
 }
 
 export function applyRewardOutcomeLearning(
   network: LearningNetwork,
   rewardAdvantage: number,
-  config: ModelConfig
+  config: ModelConfig,
+  aversiveTag?: AversiveLearningTag
 ): number {
-  const modulator = computeModulator(rewardAdvantage, config);
-  return applyRewardLearning(
+  const neuronsById = indexNeurons(network.neurons);
+  const rewardSignal = computeRewardOutcomeSignal(rewardAdvantage, config, aversiveTag);
+  const modulator = computeRewardOutcomeModulator(rewardSignal, config, aversiveTag);
+  const rewardEvents = applyRewardLearning(
     network.synapses,
-    indexNeurons(network.neurons),
-    rewardAdvantage,
+    neuronsById,
+    rewardSignal,
     modulator,
     config
-  ).length;
+  );
+  const aversiveEvents = applyAversiveStableDepotentiation(network.synapses, neuronsById, aversiveTag, config);
+  return rewardEvents.length + aversiveEvents.length;
 }
 
 export function applySupervisedMotorOutcomeLearning(

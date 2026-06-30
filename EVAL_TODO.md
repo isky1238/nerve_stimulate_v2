@@ -251,7 +251,181 @@ Scope: `/root/research/nerve_stimulate_v2`
 
 **E3 结论:snapshot_analyze(weights+path 双模式)固化。下一步从"加 stable 去固化开关"转向"解决 toxin 回避 credit assignment(避免负 reward 的强化信号)",等用户新想法。**
 
+### E4. STDP/BAP 长程复测 — stem cliff 未复发,但 rewardOnly 长程学习退化(2026-06-30)
+
+**长程读数(隔壁 agent 复测,8seed×300ep):**
+- 当前 `feat/stdp-bap-baseline`(STDP/BAP 大改后):epoch300 final mean SR=**0.344**;`SR>=0.99` solved=**0/8**;`0.4<SR<0.99` partial=**3/8**;`noop>=0.8` stuck=**2/8**。分类不是完备分桶,其余 seed 属低成功但非 noop-stuck 区间。
+- 对照 master(decayProtected 修复后,24seed×300ep):epoch300 mean SR=**0.948**;solved=**19/24**;stuck=**0/24**。
+- 曲线签名:没有旧版 ~200ep 后 sensory→inter stem 跌破阈值导致的 0/24 全死悬崖;但也没有继续爬升,200ep 后 conflict 升到约 **0.46**,表现为 partial/乱动而非 solved。
+
+**解释收紧:**
+1. **decayProtected 修复仍有效。** 长程没有复发"stem 被 stableDecay 侵蚀→inter 停发→全链路静默"的硬悬崖;structural stem 的 stableSum 仍能保持/增长。
+2. **STDP/BAP 当前版本是长程净退化。** 相比 master 修复后的 19/24 solved、SR 0.948,本分支只有 0/8 solved、SR 0.344;不能把"悬崖未复发"误读成"长程行为改进"。
+3. **退化与 E3 single-stim 证据一致。** food 通路能部分建成,但 toxin 回避通路 eff 约 0.45,够不到 motor 阈值 1.0;长程下不是全局 noop,而是 toxin credit assignment 弱导致 conflict/noop 混合。
+4. **后续优先级不变:** 先解决"避免负 reward 如何产生足够强化"的 toxin 回避 credit assignment;STDP/BAP 语义链可继续保留为实验分支,但在该问题解决前不能替代 master(decayProtected)作为行为基线。
+
+### E5. 激素代理实验前边界清理 — 参数/机制/runner 拆薄(2026-06-30)
+
+在实现 `aversive neuromodulatory tag` 之前先做行为保持清理,避免把方法、参数、机制计算和 audit transport 混在一起:
+
+- 新增 `src/core/plasticityMechanisms.ts`:只放纯计算函数,包括 activity trace、BAP-weighted STDP eligibility delta、eligibility normalization scale、reward modulator、reward/supervised fast delta、stable depotentiation delta、stable capture amount。
+- `src/core/plasticity.ts` 保留突触遍历、gate 检查、状态落账、event 记录;不再内联 STDP/modulator/capture/depotentiation 公式。
+- `src/core/mechanism.ts` 保留网络级编排;`computeModulator` 仅作为兼容 re-export,公式来源在 `plasticityMechanisms.ts`。
+- `src/config/newModelConfig.ts` 删除宽泛 `learningDynamics` 分组,改为一次性主分类:`thresholds`、`neuralDynamics`、`weightBounds`、`plasticityTimescales`、`plasticityRates`、`plasticityMechanisms`、`signalModulation`、`exploration`、`structural`、`experimentDefaults`。新增测试要求 `defaultConfig` 每个字段恰好属于一个主分类。
+- `transferMatrix` runner 修正:子进程即使 `requiredPassed=false` 也会输出 JSON;父进程先解析 stdout,再让 matrix summary 判 gate。这样 transport/IO 不再吞掉失败报告,不会把 rewardOnly gate 翻红伪装成 `stderr empty` 的 worker crash。
+
+**验证:**
+- `npm run build` 通过。
+- `npm test` 20/20 通过(新增 config 分类测试 + plasticity mechanism 纯公式测试)。
+- `npm run audit:transfer:matrix` 现在真实显示当前 STDP/BAP 分支行为红项:`requiredPassed=false`;15 cell 中 loader/supervised/seed/conflict/blank 全过,但 rewardOnly separation 仅 **6/15** 过,failed cells 为 102/103/105 相关 9 格;rew meanReward delta min=0.000 mean=0.220 max=0.550。这是机制退化事实,不是 runner 崩溃。
+
 **E 档不做(本分支 out of scope):** ~~物理时间轴(tick→ms)、传导延迟队列~~(E2 后降级为可选)、严格 τ₊/τ₋ 生物数值对齐、reward→stable 去固化开关(E3 后降级:wrong-prior 仍需,但正常 rewardOnly 的主问题是 toxin credit assignment,优先级让位)。
+
+### E6. aversive tag / "激素代理" 实验 — 默认关闭实现 + 长程 spot(2026-06-30)
+
+**实现边界:**
+- 新增 `aversiveTagStrategy: "off" | "modulatorOnly" | "avoidanceMarker" | "badOutcomeDepotentiation" | "combined"`。默认 `off`,所以基线行为只多记录 tag/信号,不改变学习。
+- `challengeTask` 只负责从任务事实派生 aversive tag:可见 toxin、noop/接近/冲突/碰撞=badOutcome,远离/避开=goodAvoidance。它不 import synapse/plasticity/export/audit。
+- `plasticityMechanisms` 只放纯计算:`computeAversiveRewardSignal`、`computeAversiveModulator`、`computeAversiveStableDepotentiationDelta`。
+- `plasticity` 只负责落账:`applyAversiveStableDepotentiation` 在 badOutcome 时按 eligibility/gate 削 motor 入突触 stableWeight。
+- `mechanism` 负责 rewardOnly 编排:`rewardAdvantage -> rewardSignal -> modulator -> rewardLearning + optional aversive stable depotentiation`。
+- trace 增加 `rewardSignal` 和 `aversiveTag`;长程脚本支持 `AVERSIVE_*` 环境变量;新增 `audit:rewardonly:natural-stim` 读取长程 JSON,输出 food/toxin 单刺激正确/错误/冲突/noop 权重画像。
+
+**默认 off 验证:**
+- `npm run build` 通过;`npm test` **21/21** 通过。
+- `audit:2d-challenge` requiredPassed=true;当前 STDP/BAP 分支 rewardOnly 仍 SR=**0.25**,noop=**0.947**,conflict=0。
+- `audit:2d-complex` requiredPassed=true;rewardOnly diagnostic Family A 仍 SR=0/noop=1。
+- `audit:transfer:matrix` 仍 requiredPassed=false,但这是机制事实:loader/supervised/seed/conflict/blank 全 15/15,**rewardOnly separation 6/15**。runner transport 已不再伪装成 worker crash。
+
+**术语收紧:**
+- 建议把用户说的"长程 toxin 自然刺激回复曲线"在代码/报告里写成 **natural single-stim response** 或 **toxin single-stim response**。意思是"不人工指定正确 motor,只把一个真实 task observation 喂给已训练网络并冻结评估",比"自然刺激"更不容易误解成生物实验。
+
+**当前 STDP/BAP 默认长程画像(`/tmp/lr_stdp_bap`,8seed×300ep):**
+- epoch300 eval mean SR=**0.344**,noop=0.200,conflict=**0.460**。
+- 单刺激全量:cleanCorrect=**11/32**,correctEff>=1=30/32,wrongEff>=1=**19/32**,conflict=19/32,noop=2/32。
+- food-left clean=2/8,food-right clean=0/8;toxin-left clean=4/8,toxin-right clean=5/8。
+- 解释:不是 stem cliff 复发,也不是纯 toxin 不发;而是 correct 和 wrong 权重大量同时过阈,后期变成冲突型"星空式"权重场。正确通路常常已建成,但错误侧也被点亮,无法稳定收敛成单一主干。
+
+**4 seed spot 结果(300ep):**
+- `modulatorOnly,gain=0.5`:mean SR=**0.125**,noop=0,conflict=**0.875**;cleanCorrect=2/16。全局调制放大了"都增强",净负。
+- `badOutcomeDepotentiation,rate=0.04`:mean SR=**0.250**,noop=0.631,conflict=0.211;toxin wrong 被压住,但 toxin 通路仍弱/noop,food wrong 后期冲突上升。单独削 stable 不足。
+- `avoidanceMarker,bonus=0.5`:4seed epoch200 SR=**1.000**,epoch300 SR=**0.813**;cleanCorrect 200ep=16/16,300ep=13/16。
+- `combined,bonus=0.5,rate=0.04`:epoch300 SR=**0.813**,与 avoidanceMarker 接近;没有看到 depotentiation 明确增益。
+
+**8 seed 复核(best spot: `avoidanceMarker,bonus=0.5`):**
+- 长程:epoch150 SR=0.938,epoch200 SR=**1.000**,epoch250 SR=0.938,epoch300 SR=**0.844**;300ep solved=4/8,partial=4/8,stuck=0/8。
+- 单刺激:epoch200 cleanCorrect=**32/32**,wrongEff>=1=0/32;epoch300 cleanCorrect=**27/32**,wrongEff>=1=4/32,conflict=4/32,noop=1/32。
+- 后期退化主要来自 food-left/food-right 的错误侧权重上升(food-right 300ep clean=5/8),不是 toxin 回避继续缺失。toxin-left 8/8 clean,toxin-right 7/8 clean。
+
+**结论(只按当前 spot 级别):**
+1. 用户提出的"负向感觉神经元触发的带 reward 标记冲动"方向有实证信号。`avoidanceMarker` 不使用监督式 correct motor 标签,只把"可见 toxin 后成功远离/避免"转换成正向 rewardSignal,能把 8seed 200ep 从默认 0/8 solved 提到 8/8 solved。
+2. 当前有效部分更像"避免负结果的正向固化门",不是"坏结果直接去极化"。直接 badOutcome depotentiation 容易削弱或误伤,目前未带来净增益。
+3. 300ep 回落说明机制仍不稳:早期能形成正确网络主干,后期仍可能出现错误侧权重补亮。下一步应先研究 over-training/capture/food wrong-side 抑制,再决定是否引入更精细的 aversive depotentiation。
+4. 现阶段不能升为行为基线。需 24seed×300ep、bonus/rate sweep、transfer matrix gate,以及多物体 complex 复核后再定。
+
+### E7. 神经元基数/长步数/并发/权重图谱复测(2026-06-30)
+
+**实验基础设施:**
+- `topologyBlueprint` 新增 `createScaledOfflineLearningTopologyBlueprint({ interneuronCopiesPerSensor, normalizeReadoutByCopies })`。默认 `offlineLearningTopologyBlueprint` 仍是 1x,现有模型/测试不变。
+- scale 只通过长程实验的 `initialNetwork` 打开;canonical sensory/motor 名称保持不变,每个 sensory 对应的 interneuron 干线复制为 `iFoodLeft_copy2` 等。
+- `TOPOLOGY_READOUT_MODE=normalized` 默认把每条 inter→motor 初始 fastWeight 设为 `0.35/scale`,保证同一 sensory 通道的初始总 readout 仍是 0.35;`raw` 保留为放大输入强度的对照模式。
+- `scripts/longrange_sweep.cjs` 新增环境参数:`EPOCHS`,`MAX_STEPS`,`SEEDS`,`SEED_LIMIT`,`CHECKPOINTS`,`CONCURRENCY`,`TOPOLOGY_SCALE`,`TOPOLOGY_READOUT_MODE`。
+- `audit:rewardonly:natural-stim` 已改为按同一 sensory 通道汇总复制 inter 的 eff,不再把每条复制突触单独当成 motor 阈值判定。
+- 新增 `audit:rewardonly:weight-map` 和 `audit:rewardonly:checkpoint-probe`:
+  - `weight-map` 读取长程 checkpoint,输出 grouped/full sensory→inter 和 inter→motor 权重图谱。
+  - `checkpoint-probe` 从 checkpoint 重建真实网络,运行 `runChallengeEpisode` 单点 food/toxin left/right,不是只靠权重阈值推断。
+
+**验证:**
+- `npm run build` 通过。
+- `npm test` **22/22** 通过;新增 scale topology 测试锁住 1x 默认不变和 scale=2 normalized 初始总 readout=0.35。
+- smoke:`SUBDIR=lr_scale2_smoke SEED_LIMIT=2 EPOCHS=20 CHECKPOINTS=1,5,10,20 TOPOLOGY_SCALE=2 ...` 可落盘并被 natural-stim / weight-map / checkpoint-probe 读回。20ep 仍全 noop,只作为管线验证。
+
+**扩容对照结果(400ep,normalized,8 并发):**
+
+1. `scale=2,aversive=off,8seed×400ep`
+   - 命令:`SUBDIR=lr_scale2_off8_e400 SEED_LIMIT=8 EPOCHS=400 TOPOLOGY_SCALE=2 TOPOLOGY_READOUT_MODE=normalized CONCURRENCY=8 npm run audit:rewardonly:longrange`
+   - epoch400 mean SR=**0.500**,noop=**0.857**,conflict=0,solved=0/8,stuck=8/8。
+   - 单点/权重图:food-left/right 8/8 clean;toxin-left/right 0/8 clean、8/8 noop。结论:神经元复制本身不足,只稳定形成 food 主干,toxin 回避仍无正向固化。
+
+2. `scale=2,avoidanceMarker bonus=0.5,8seed×400ep`
+   - 命令:`SUBDIR=lr_scale2_avoid8_e400 SEED_LIMIT=8 EPOCHS=400 TOPOLOGY_SCALE=2 AVERSIVE_TAG_STRATEGY=avoidanceMarker AVERSIVE_AVOIDANCE_BONUS=0.5 ...`
+   - epoch250 SR=**0.969**,epoch300 SR=0.969,epoch400 SR=**0.969**;epoch400 solved=7/8,stuck=0/8,noop=0,conflict=0.021。
+   - 单点 epoch400:food-left 8/8 clean,food-right 8/8 clean,toxin-left 8/8 clean,toxin-right 7/8 clean + 1/8 conflict。
+   - 结论:scale=2 + avoidanceMarker 能形成接近完整的正确主干;残余失败集中在个别 toxin wrong-side stable 也过阈。
+
+3. `scale=4,avoidanceMarker bonus=0.5,8seed×400ep`
+   - 命令:`SUBDIR=lr_scale4_avoid8_e400 SEED_LIMIT=8 EPOCHS=400 TOPOLOGY_SCALE=4 ...`
+   - epoch400 mean SR=**0.563**,noop=**0.819**,solved=0/8,stuck=6/8。
+   - 单点 epoch400:food-left/right 8/8 clean;toxin-left 1/8 clean,toxin-right 1/8 clean。
+   - 结论:基数不是单调越大越好。normalized 后每条复制 readout 太薄或学习被分散,toxin 通路多数达不到 motor 阈值。
+
+4. `scale=2,avoidanceMarker bonus=0.5,24seed×400ep`
+   - 命令:`SUBDIR=lr_scale2_avoid24_e400 EPOCHS=400 CHECKPOINTS=100,150,200,250,300,350,400 TOPOLOGY_SCALE=2 TOPOLOGY_READOUT_MODE=normalized CONCURRENCY=8 AVERSIVE_TAG_STRATEGY=avoidanceMarker AVERSIVE_AVOIDANCE_BONUS=0.5 npm run audit:rewardonly:longrange`
+   - 长程:epoch200 SR=0.844,epoch250 SR=0.948,epoch300 SR=0.969,epoch350 SR=**0.979**,epoch400 SR=**0.969**。
+   - epoch400 分布:solved=**21/24**,partial=3/24,stuck=0/24,noop=0,conflict=0.021。
+   - 单点 epoch400:
+     - food-left **24/24** clean,meanCorrect=1.990,meanWrong=0.028。
+     - food-right **24/24** clean,meanCorrect=2.142,meanWrong=0.045。
+     - toxin-left **23/24** clean,1/24 conflict,meanCorrect=1.462,meanWrong=0.289。
+     - toxin-right **22/24** clean,2/24 conflict,meanCorrect=1.504,meanWrong=0.472。
+   - 失败 seed:81/151 为 toxin-right conflict,241 为 toxin-left conflict。full weight map 显示 sensory→inter stems 全部保持 eff=1.1;失败来自 toxin wrong motor 的 stableWeight 也被固化到阈值以上,不是 stem 断裂、也不是 formatter 误判。
+
+**解释收紧:**
+1. "模型发育需要神经基数/机遇/长期过程"这个怀疑有必要。1x/300ep spot 会低估 scale=2 + avoidanceMarker 的潜力;24seed×400ep 显示它不是偶然单 seed。
+2. 这轮 `TOPOLOGY_SCALE` 不是完整的"等比放大神经基数"实验。它只复制每个 sensory 通道的 interneuron 副本,固定 sensory/motor 数、motor 阈值、capture/use/stable 阈值和学习率;因此 scale=4 退化**不能**证明"增大神经基数无效"。
+3. scale=4 normalized 明显退化,只能说明当前这套"只扩中间层 + 每条 readout 除以 scale + 固定单节点阈值/突触规则"不具备规模不变性。该结果是对复杂模拟的警告:扩节点时必须同时设计 slot/局部连接/阈值/归一化/竞争规则,不能只改一个维度。
+4. 当前最好解释:avoidanceMarker 提供了 toxin 回避的正向固化信号;scale=2 这类有限冗余提供更多形成机会;两者叠加能解决多数 toxin noop。但残余 conflict 仍是"错误 stable 也被固化"问题,需要后续研究选择性去固化或更局部的 aversive 标记。
+5. 不能把短程 audit 当作实验价值否定。短程测试只保证通路/回归,长程发育要看 checkpoint 曲线、权重图谱和真实单点激发。
+
+**与用户预期模型的差距(需下一轮补齐):**
+- 用户预期更接近 `2 input / ~10 medium / 2 output`,每个节点 1-5 条局部突触(至少多数节点 >2),按最近/局部连接机制形成通路。
+- 当前 challenge blueprint 是语义固定 `4 sensory / 4 inter / 2 motor`,scale 只复制 inter,并不是 `2/10/2` 或其最小公约数族。
+- 下一轮应新增真正的 topology family:输入/中间/输出层按比例扩展,节点 slot 数、局部半径、fan-in/fan-out、阈值归一化一起显式参数化,再重新比较 1x/2x/4x。
+
+### E8. topology family 测试集补齐 — 比例族/fanout-n/最近连接(2026-06-30)
+
+**语义修正:**
+- `2/10/2` 不应被理解成"只把中间层放大到 10"。它是 `1/5/1` 的 2x 共同倍数族。
+- `1/10/2`、`2/5/2` 不是 `1/5/1` 的等比放大,而是不同最小比例族/特殊不均衡模拟。它们仍然是合法 topology 实验,只是报告时不能把它们和 `2/10/2` 混进同一个 scale 结论里。
+- 测试集必须允许任意合理的 `input / medium / output / synapses n` 组合;只有当我们声称"等比放大"时,才检查 `sameLayerRatio=true`。
+- 用户口语里的"最小公倍数/最小公约数模型"在代码里拆成两件事:
+  - `reduceLayerCounts`:用最大公约数把 `2/10/2` 归约成 `1/5/1`,并记录 `commonScale=2`。
+  - `sameLayerRatio`:判断两个层数是否属于同一比例族。
+
+**已补测试边界:**
+- 新增 `src/core/layeredTopologyBlueprint.ts`:
+  - `reduceLayerCounts({2,10,2}) -> {1,5,1, commonScale:2}`。
+  - `sameLayerRatio(1/5/1, 2/10/2)=true`。
+  - `sameLayerRatio(1/5/1, 1/10/2)=false`。
+  - `sameLayerRatio(1/5/1, 2/5/2)=false`。
+- 新增 `createNearestLayeredTopologyBlueprint`:
+  - 参数是 `inputCount / mediumCount / outputCount / synapsesPerInput / synapsesPerMedium`。
+  - fanout n 限制在 1-5。
+  - input→medium 和 medium→output 都按 y 轴最近节点连接。
+  - slot 数由实际边自动写入,避免默认 slot 上限误伤 scale 实验。
+- 新测试固定 `2/10/2, synapsesPerInput=5, synapsesPerMedium=2`:
+  - 2 input、10 medium、2 output。
+  - input0 最近连接 medium0-4,input1 最近连接 medium5-9。
+  - 每个 medium 有 1 条输入、2 条输出;每个 output 有 10 条输入。
+  - 可以实例化为真实 `LearningNetwork`。
+
+**仍未完成:**
+- 该 topology family 目前只进入结构测试和 standalone rewardOnly probe,还没有接入 challenge/world 训练 runner。
+- 下一步需要做的是:把 `layeredTopologyBlueprint` 接入更正式的 topology-family experiment,再跑 `1/5/1`、`2/10/2`、`4/20/4` 等比例族,并与 `1/10/2`、`2/5/2` 这种不均衡族分开报告。
+
+**第一批 standalone topology-family probe(8seed×200ep):**
+- 新增 `scripts/topology_family_probe.cjs` / `npm run audit:topology-family`。它不使用 2D challenge 语义,只跑任意 layered topology 的 input→output rewardOnly 映射,并输出旧指标族:SR、noop、conflict、wrong-only、correctEff、wrongEff、single-stim signature。
+- 命令:`SEED_LIMIT=8 EPOCHS=200 CHECKPOINTS=20,50,100,150,200 npm run audit:topology-family`。
+- `ratio_1_5_1_fan5x1`:SR=**1.000**,noop=0,conflict=0,solved=8/8,correctEff=1.702。
+- `ratio_2_10_2_fan5x1`:SR=**1.000**,noop=0,conflict=0,solved=8/8,correctEff=1.685。该结果说明 `2/10/2` 作为 `1/5/1` 的 2x 比例族,在最近单输出 readout 下没有出现仅由等比放大导致的退化。
+- `ratio_2_10_2_fan5x2`:SR=**0.000**,conflict=**1.000**,correctEff=1.847,wrongEff=1.732。FULL signature 全部 `XX`:每个 input 的正确和错误 output 都过阈。这是 fanout=2/full readout 带来的结构性 conflict,不是等比基数本身失效。
+- `arb_1_10_2_fan5x1`:SR=**1.000**,noop=0,conflict=0,correctEff=1.021,wrongEff=0.633。它不是 `1/5/1` 等比族,但作为任意 topology 是可跑且可解的。
+- `arb_2_5_2_fan3x1`:SR=**0.500**,noop=**0.500**,conflict=0,correctEff=0.884。FULL signature 全部 `CN`:input0 过阈,input1 正确 eff 长期低于 1.0。初步判断是最近连接覆盖/中间层容量不足/阈值组合导致的一侧通路弱化。
+
+**当前解释:**
+1. 新测试集已经能把三类问题分开:等比比例族、任意不均衡 topology、fanout 造成的结构性 conflict。
+2. `fanout n>=2` 不是自动更好;如果 medium 同时连到所有 output,且没有局部竞争/抑制/选择性去固化,就会出现 correct 和 wrong output 同时过阈。
+3. `2/5/2` 的 noop 表明"少 medium + 最近连接 + 固定阈值"会让某些 input 覆盖不足;这更接近用户担心的单节点输入/输出固定问题,应继续作为 topology-family 指标。
 
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
@@ -282,3 +456,4 @@ Scope: `/root/research/nerve_stimulate_v2`
 6. 新诊断工具:`audit:rewardonly:collapse`(complex)+ `audit:rewardonly:challenge-collapse`(challenge),per-epoch 双侧 fastWeight 对称性 + 训练 conflict/noop 曲线,作为 C 档修复的回归基准。
 7. **长程验证推翻"fast 衰减跌破阈"假说,坐实真根因**:24seed×300ep 显示 rewardOnly 是"爬升到峰(~200ep SR 0.865)→ 灾难性悬崖(300ep 0/24 全死)",非单调恢复。真因不是 inter→motor fast/credit,而是 **sensory→inter 结构干线(init stable=1.1)被 `stableDecay=0.99999` 侵蚀,~200-250ep 跌破 inter axon 阈值 1.0 → inter 停发 → 整条 motor 链静默**(两 tick 架构下 inter somaPotential 是单次传导无累积,故是硬悬崖)。吸收态不可逆。反证:全局 `stableDecay=1.0` 悬崖消失。**修复**:给 `Synapse.decayProtected` 标记结构性干线,`decayWeights` 跳过其 stableDecay(learned 突触仍衰减)。修后 300ep 0/24→19/24 solved、transfer gate 不翻负。教训:① "权重跌破阈"得看**哪条**权重(sensory→inter 干线 vs inter→motor 学习突触),不能笼统;② 长程(>200ep)才暴露的悬崖不会被 40ep audit 看见,评估必须有长程基线;③ 结构性硬线与可遗忘记忆不该共用同一 passive decay。
 8. **wrong-prior × rewardOnly 实测坐实 stable 去固化缺口(2026-06-30,`scripts/wrongprior_rewardonly.cjs`,6seed×300ep)**:supervised+reverseMapping 注入 wrong-prior(stable=2.0=maxWeight,dualLock=6/6),两臂都用正确映射继续学。supervised 臂 1ep 恢复、1ep 清 dualLock(`wasWronglyActive` 砍 stable 2.0→0.073);**rewardOnly 臂 0/6 在 300ep 恢复、0/6 清 dualLock,wrongMaxStable 全程钉死 2.000,SR 全程 0**。根因:rewardOnly `applyRewardLearning` 只动 fast(deltaStable:0)、不碰 stable;stable=2.0 单凭自己持续驱动错误 motor;且**自维持锁**——错误 stable 驱动错误 motor 发放→coactivity→`captureStableWeights` 每步回补 fast→stable,stable 钉在 maxWeight 不被动衰减;正确通路 correctMaxFast 全程 0(eligibility=0 被 skip,bootstrap 不起来)。**注**:此前判此题"不可测"(rewardOnly+reverseMapping 注入是 no-op,因 reward 不读 expectedAction),bypass 设计用 supervised 注入 + rewardOnly 正确映射 unlearn 绕开。结论:reward-driven stable 去固化**必要**但**不充分**(解不了 correct-path bootstrap,须与第1条同治)。
+9. **STDP/BAP 大改后的长程复测给出负结论**:decayProtected 的 stem cliff 没复发,但 rewardOnly 长程行为从 master 修复后的 mean SR 0.948、19/24 solved 退化到本分支 mean SR 0.344、0/8 solved。当前问题不是"又坠崖",而是"food 能 partial 学会,toxin 回避 credit 不够,200ep 后 conflict/noop 混合"。因此 STDP/BAP 分支暂不能升为行为基线;下一步必须先处理 toxin 回避的正向强化信号。

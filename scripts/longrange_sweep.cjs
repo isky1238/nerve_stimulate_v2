@@ -10,7 +10,11 @@
  * + per-motor fire rates. Writes one JSON per seed; coordinator aggregates.
  *
  * Env knobs (optional, for confirmation/ablation runs): STABLE_DECAY, FAST_DECAY,
- * SUBDIR (output dir under /tmp, default lr_sweep), SEED_LIMIT (use first N seeds).
+ * AVERSIVE_TAG_STRATEGY, AVERSIVE_TAG_GAIN, AVERSIVE_AVOIDANCE_BONUS,
+ * AVERSIVE_DEPOTENTIATION_RATE, AVERSIVE_BAD_OUTCOME_THRESHOLD, SUBDIR
+ * (output dir under /tmp, default lr_sweep), SEEDS, SEED_LIMIT, EPOCHS,
+ * MAX_STEPS, CHECKPOINTS, CONCURRENCY, TOPOLOGY_SCALE,
+ * TOPOLOGY_READOUT_MODE=normalized|raw.
  */
 const { fork } = require("node:child_process");
 const fs = require("node:fs");
@@ -28,6 +32,10 @@ const {
   DEFAULT_CHALLENGE_MAX_STEPS
 } = require(path.join(ROOT, "dist/src/world/challenge2d"));
 const { defaultConfig, withConfig } = require(path.join(ROOT, "dist/src/config/newModelConfig"));
+const {
+  createLearningNetworkFromBlueprint,
+  createScaledOfflineLearningTopologyBlueprint
+} = require(path.join(ROOT, "dist/src/core/topologyBlueprint"));
 
 // Optional config overrides via env for confirmation runs (no source edit):
 //   STABLE_DECAY=1.0   -> disable stable-weight passive decay (tests bottleneck-erosion hypothesis)
@@ -35,19 +43,67 @@ const { defaultConfig, withConfig } = require(path.join(ROOT, "dist/src/config/n
 const ENV_OVERRIDE = {};
 if (process.env.STABLE_DECAY !== undefined) ENV_OVERRIDE.stableDecay = Number(process.env.STABLE_DECAY);
 if (process.env.FAST_DECAY !== undefined) ENV_OVERRIDE.fastDecay = Number(process.env.FAST_DECAY);
+if (process.env.AVERSIVE_TAG_STRATEGY !== undefined) ENV_OVERRIDE.aversiveTagStrategy = process.env.AVERSIVE_TAG_STRATEGY;
+if (process.env.AVERSIVE_TAG_GAIN !== undefined) ENV_OVERRIDE.aversiveTagGain = Number(process.env.AVERSIVE_TAG_GAIN);
+if (process.env.AVERSIVE_AVOIDANCE_BONUS !== undefined) ENV_OVERRIDE.aversiveAvoidanceBonus = Number(process.env.AVERSIVE_AVOIDANCE_BONUS);
+if (process.env.AVERSIVE_DEPOTENTIATION_RATE !== undefined) ENV_OVERRIDE.aversiveDepotentiationRate = Number(process.env.AVERSIVE_DEPOTENTIATION_RATE);
+if (process.env.AVERSIVE_BAD_OUTCOME_THRESHOLD !== undefined) ENV_OVERRIDE.aversiveBadOutcomeThreshold = Number(process.env.AVERSIVE_BAD_OUTCOME_THRESHOLD);
 
-const TOTAL_EPOCHS = 300;
-const SEEDS = [
+const DEFAULT_TOTAL_EPOCHS = 300;
+const DEFAULT_SEEDS = [
   21, 31, 41, 51, 61, 71, 81, 91, 101, 111, 121, 131,
   141, 151, 161, 171, 181, 191, 201, 211, 221, 231, 241, 251
 ];
-const CHECKPOINTS = new Set([1, 2, 3, 5, 8, 12, 20, 30, 40, 60, 80, 100, 150, 200, 250, 300]);
-const INTERNEURON_IDS = ["iFoodLeft", "iFoodRight", "iToxinLeft", "iToxinRight"];
+const DEFAULT_CHECKPOINTS = [1, 2, 3, 5, 8, 12, 20, 30, 40, 60, 80, 100, 150, 200, 250, 300];
+
+function numberEnv(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function numberListEnv(name, fallback) {
+  if (!process.env[name]) return fallback;
+  const values = process.env[name]
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value));
+  return values.length ? values : fallback;
+}
+
+const TOTAL_EPOCHS = numberEnv("EPOCHS", DEFAULT_TOTAL_EPOCHS);
+const MAX_STEPS = numberEnv("MAX_STEPS", DEFAULT_CHALLENGE_MAX_STEPS);
+const CONCURRENCY = Math.max(1, Math.floor(numberEnv("CONCURRENCY", 8)));
+const SEEDS = numberListEnv("SEEDS", DEFAULT_SEEDS);
+const CHECKPOINTS = new Set(numberListEnv("CHECKPOINTS", DEFAULT_CHECKPOINTS).concat(TOTAL_EPOCHS));
+const TOPOLOGY_SCALE = Math.max(1, Math.floor(numberEnv("TOPOLOGY_SCALE", 1)));
+const TOPOLOGY_READOUT_MODE = process.env.TOPOLOGY_READOUT_MODE === "raw" ? "raw" : "normalized";
+
+function roleByNeuronId(network) {
+  return new Map(network.neurons.map((neuron) => [neuron.id, neuron.role]));
+}
+
+function isInterToMotorSynapse(synapse, roles) {
+  return roles.get(synapse.preNeuronId) === "interneuron" && roles.get(synapse.postNeuronId) === "motor";
+}
+
+function isSensoryToInterSynapse(synapse, roles) {
+  return roles.get(synapse.preNeuronId) === "sensory" && roles.get(synapse.postNeuronId) === "interneuron";
+}
+
+function createInitialNetwork(config) {
+  if (TOPOLOGY_SCALE === 1) return undefined;
+  const blueprint = createScaledOfflineLearningTopologyBlueprint({
+    interneuronCopiesPerSensor: TOPOLOGY_SCALE,
+    normalizeReadoutByCopies: TOPOLOGY_READOUT_MODE !== "raw"
+  });
+  return createLearningNetworkFromBlueprint(blueprint, config);
+}
 
 function motorSums(network) {
+  const roles = roleByNeuronId(network);
   let lf = 0, rf = 0, ls = 0, rs = 0;
   for (const s of network.synapses) {
-    if (!INTERNEURON_IDS.includes(s.preNeuronId)) continue;
+    if (!isInterToMotorSynapse(s, roles)) continue;
     if (s.postNeuronId === "leftMotor") { lf += s.fastWeight; ls += s.stableWeight; }
     else if (s.postNeuronId === "rightMotor") { rf += s.fastWeight; rs += s.stableWeight; }
   }
@@ -68,10 +124,10 @@ function trainRatesFromEpisodes(episodes) {
 }
 
 function interMotorSynapseStates(network) {
+  const roles = roleByNeuronId(network);
   const out = [];
   for (const s of network.synapses) {
-    if (!INTERNEURON_IDS.includes(s.preNeuronId)) continue;
-    if (s.postNeuronId !== "leftMotor" && s.postNeuronId !== "rightMotor") continue;
+    if (!isInterToMotorSynapse(s, roles)) continue;
     out.push({
       pre: s.preNeuronId, post: s.postNeuronId,
       fast: s.fastWeight, stable: s.stableWeight,
@@ -82,10 +138,10 @@ function interMotorSynapseStates(network) {
 }
 
 function sensoryInterSynapseStates(network) {
+  const roles = roleByNeuronId(network);
   const out = [];
   for (const s of network.synapses) {
-    if (s.postNeuronId !== "iFoodLeft" && s.postNeuronId !== "iFoodRight" &&
-        s.postNeuronId !== "iToxinLeft" && s.postNeuronId !== "iToxinRight") continue;
+    if (!isSensoryToInterSynapse(s, roles)) continue;
     out.push({
       pre: s.preNeuronId, post: s.postNeuronId,
       fast: s.fastWeight, stable: s.stableWeight,
@@ -133,16 +189,19 @@ function frozenEval(network, config, evalScenarios) {
 function runWorker(seed, outPath) {
   const baseConfig = Object.keys(ENV_OVERRIDE).length ? withConfig(ENV_OVERRIDE) : defaultConfig;
   const config = createChallengeConfig(baseConfig);
-  const evalScenarios = createChallengeScenarios(DEFAULT_EVAL_SEEDS, DEFAULT_CHALLENGE_MAX_STEPS);
+  const evalScenarios = createChallengeScenarios(DEFAULT_EVAL_SEEDS, MAX_STEPS);
   const weightSeries = [];
   const checkpoints = [];
+  const initialNetwork = createInitialNetwork(config);
 
   const result = runChallengeExperiment(config, {
     seed,
     trainSeeds: DEFAULT_TRAIN_SEEDS,
     evalSeeds: DEFAULT_EVAL_SEEDS,
     epochs: TOTAL_EPOCHS,
+    maxSteps: MAX_STEPS,
     learningMode: "rewardOnly",
+    initialNetwork,
     epochProbe: (epoch, network, epochEpisodes) => {
       const { lf, rf, ls, rs } = motorSums(network);
       weightSeries.push({ epoch, lf, rf, ls, rs });
@@ -180,7 +239,19 @@ function runWorker(seed, outPath) {
     evalConflict: result.conflictRate
   };
 
-  fs.writeFileSync(outPath, JSON.stringify({ seed, weightSeries, checkpoints, finalEval }));
+  fs.writeFileSync(outPath, JSON.stringify({
+    seed,
+    config: {
+      epochs: TOTAL_EPOCHS,
+      maxSteps: MAX_STEPS,
+      envOverride: ENV_OVERRIDE,
+      topologyScale: TOPOLOGY_SCALE,
+      topologyReadoutMode: TOPOLOGY_READOUT_MODE
+    },
+    weightSeries,
+    checkpoints,
+    finalEval
+  }));
 }
 
 function aggregate(seedResults) {
@@ -229,7 +300,6 @@ function main() {
   const subdir = process.env.SUBDIR || "lr_sweep";
   const tmpDir = path.join("/tmp", subdir);
   fs.mkdirSync(tmpDir, { recursive: true });
-  const CONCURRENCY = 8;
   const seedsUsed = process.env.SEED_LIMIT ? SEEDS.slice(0, Number(process.env.SEED_LIMIT)) : SEEDS;
   const queue = seedsUsed.map((seed) => ({ seed, outPath: path.join(tmpDir, `lr_${seed}.json`) }));
   const running = [];
@@ -250,18 +320,22 @@ function main() {
 
   function finish() {
     const results = [];
-    for (const seed of SEEDS) {
+    for (const seed of seedsUsed) {
       const p = path.join(tmpDir, `lr_${seed}.json`);
       if (fs.existsSync(p)) results.push(JSON.parse(fs.readFileSync(p, "utf8")));
     }
     const agg = aggregate(results);
-    printReport(agg, results);
+    printReport(agg, results, seedsUsed.length);
   }
 
-  function printReport(agg, results) {
+  function printReport(agg, results, requestedSeedCount) {
     const lines = [];
     lines.push("=== rewardOnly 2D-challenge long-range sweep ===");
-    lines.push(`seeds=${SEEDS.length} epochs=${TOTAL_EPOCHS} concurrency=8 (per-epoch probe + sparse frozen-eval checkpoints)`);
+    lines.push(`seeds=${requestedSeedCount} epochs=${TOTAL_EPOCHS} maxSteps=${MAX_STEPS} concurrency=${CONCURRENCY} topologyScale=${TOPOLOGY_SCALE} readout=${TOPOLOGY_READOUT_MODE}`);
+    if (Object.keys(ENV_OVERRIDE).length) {
+      lines.push(`configOverride=${JSON.stringify(ENV_OVERRIDE)}`);
+    }
+    lines.push("(per-epoch probe + sparse frozen-eval checkpoints)");
     lines.push("");
     lines.push("Per-checkpoint aggregate (mean across seeds):");
     lines.push("  epoch   SR     noop   confl  fastSum stableSum effSum  leftFire rightFire %solved %partial %noopStuck");
@@ -274,8 +348,8 @@ function main() {
     }
     lines.push("");
     lines.push("Weight-drop timing (effSum = left+right fast+stable):");
-    lines.push(`  first epoch effSum<1.5: mean=${fmt(agg.dropTiming.drop15, 1)} (${agg.dropTiming.n15}/${SEEDS.length} seeds ever dropped)`);
-    lines.push(`  first epoch effSum<1.0: mean=${fmt(agg.dropTiming.drop10, 1)} (${agg.dropTiming.n10}/${SEEDS.length} seeds ever dropped)`);
+    lines.push(`  first epoch effSum<1.5: mean=${fmt(agg.dropTiming.drop15, 1)} (${agg.dropTiming.n15}/${results.length} seeds ever dropped)`);
+    lines.push(`  first epoch effSum<1.0: mean=${fmt(agg.dropTiming.drop10, 1)} (${agg.dropTiming.n10}/${results.length} seeds ever dropped)`);
     lines.push("");
     // final distribution
     const finalRows = results.map((r) => {

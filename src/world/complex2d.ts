@@ -172,6 +172,7 @@ export function runComplexEpisode(
       reward: reward.reward,
       rewardBaseline,
       rewardAdvantage,
+      rewardSignal: rewardAdvantage,
       distanceDelta: reward.distanceDelta,
       after,
       terminalReason: reward.terminalReason,
