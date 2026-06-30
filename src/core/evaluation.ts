@@ -1,10 +1,11 @@
 import { defaultConfig, ModelConfig, withConfig } from "../config/newModelConfig";
-import { PairMemory, attachSynapseToSlots, tryFormConnections, updateConnectionStates } from "./development";
+import { PairMemory, tryFormConnections, updateConnectionStates } from "./development";
 import { createNeuron, indexNeurons, integrateNeuron, Neuron, resetBranchInputs, resetNeuronRuntime, setSensoryOutput } from "./neuron";
 import { applySupervisedMotorLearning, captureStableWeights, decayWeights, updateEligibility } from "./plasticity";
 import { SeededRandom } from "./random";
 import { Signal } from "./signal";
 import { createSynapse, propagateSynapses, Synapse } from "./synapse";
+import { createLearningNetworkFromBlueprint, offlineLearningTopologyBlueprint } from "./topologyBlueprint";
 
 export interface EvaluationResult {
   name: string;
@@ -379,83 +380,7 @@ function runTwoStepCircuit(
 }
 
 export function createOfflineLearningNetwork(config: ModelConfig): LearningNetwork {
-  const sensors = [
-    createNeuron({ id: "foodLeft", role: "sensory", position: { x: 0, y: 0 } }, config),
-    createNeuron({ id: "foodRight", role: "sensory", position: { x: 0, y: 1 } }, config),
-    createNeuron({ id: "toxinLeft", role: "sensory", position: { x: 0, y: 2 } }, config),
-    createNeuron({ id: "toxinRight", role: "sensory", position: { x: 0, y: 3 } }, config)
-  ];
-  const inters = [
-    createNeuron({ id: "iFoodLeft", role: "interneuron", position: { x: 1, y: 0 }, branchCount: 1 }, config),
-    createNeuron({ id: "iFoodRight", role: "interneuron", position: { x: 1, y: 1 }, branchCount: 1 }, config),
-    createNeuron({ id: "iToxinLeft", role: "interneuron", position: { x: 1, y: 2 }, branchCount: 1 }, config),
-    createNeuron({ id: "iToxinRight", role: "interneuron", position: { x: 1, y: 3 }, branchCount: 1 }, config)
-  ];
-  const motors = [
-    createNeuron({ id: "leftMotor", role: "motor", position: { x: 2, y: 0 }, branchCount: 1 }, config),
-    createNeuron({ id: "rightMotor", role: "motor", position: { x: 2, y: 1 }, branchCount: 1 }, config)
-  ];
-  const neurons = [...sensors, ...inters, ...motors];
-  const byId = indexNeurons(neurons);
-  const synapses: Synapse[] = [];
-
-  for (let index = 0; index < sensors.length; index += 1) {
-    // Sensory→interneuron stems are the network's only afferent input干线.
-    // Their stable weight (1.1) sits just above the inter axon threshold (1.0);
-    // passive stableDecay would erode that 0.1 margin over ~200-250 epochs and
-    // silently sever the entire downstream motor chain (the rewardOnly noop
-    // cliff). Mark them decayProtected so stableWeight is preserved; the
-    // plastic inter→motor synapses below remain fully decayable.
-    addFixedSynapse(synapses, byId, sensors[index].id, inters[index].id, inters[index].branches[0].id, 0, 1.1, config, true);
-  }
-
-  for (const inter of inters) {
-    for (const motor of motors) {
-      addFixedSynapse(synapses, byId, inter.id, motor.id, motor.branches[0].id, 0.35, 0, config, false);
-    }
-  }
-
-  return {
-    neurons,
-    synapses,
-    pairMemory: [],
-    tick: 0
-  };
-}
-
-function addFixedSynapse(
-  synapses: Synapse[],
-  neuronsById: Map<string, Neuron>,
-  preId: string,
-  postId: string,
-  postBranchId: string,
-  fastWeight: number,
-  stableWeight: number,
-  config: ModelConfig,
-  decayProtected = false
-): void {
-  const synapse = createSynapse(
-    {
-      id: `fixed-${preId}-${postId}-${synapses.length}`,
-      preNeuronId: preId,
-      postNeuronId: postId,
-      postBranchId,
-      effectSign: 1,
-      state: "active",
-      fastWeight,
-      stableWeight,
-      decayProtected
-    },
-    config
-  );
-  const pre = neuronsById.get(preId);
-  const post = neuronsById.get(postId);
-
-  if (!pre || !post || !attachSynapseToSlots(pre, post, synapse)) {
-    throw new Error(`Unable to attach synapse ${synapse.id}.`);
-  }
-
-  synapses.push(synapse);
+  return createLearningNetworkFromBlueprint(offlineLearningTopologyBlueprint, config);
 }
 
 export function offlinePatterns(): Pattern[] {

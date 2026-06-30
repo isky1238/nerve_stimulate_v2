@@ -8,6 +8,32 @@ Scope: `/root/research/nerve_stimulate_v2`
 
 ## 当前实证基线
 
+### 分层重构行为基线(2026-06-30)
+- 当前分支:`feat/decayprotected-sensory-stem`;本轮分层只移动边界,不引入新学习机制。
+- 冻结门:`npm test` 18/18;`audit:transfer:matrix` 15/15;`audit:2d-challenge` / `audit:2d-complex` requiredPassed=true。
+- rewardOnly collapse 基线保持:
+  - `audit:rewardonly:challenge-collapse`:40ep frozen SR=0.500,conflict=0.000,noop=0.857,meanReward=0.550。
+  - `audit:rewardonly:collapse`:Family A SR=1.000/conflict=0/noop=0;multi-object SR=0.500,conflict≈0.333。
+- 长程 spot:`SEED_LIMIT=4 SUBDIR=lr_spot_refactor npm run audit:rewardonly:longrange` → epoch300 mean SR=0.875,noop=0.353,noopStuck=0/4;stem cliff 未复发。
+- 结构拆分后的职责边界:
+  - config:只分类参数,保留 `defaultConfig` / `withConfig` 对外兼容。
+  - topology blueprint:声明 sensory / interneuron / motor 节点;`sensory→inter` 是 structural stem(`stableWeight=1.1`,`decayProtected=true`),`inter→motor` 是 plastic readout(`fastWeight=0.35`,`decayProtected=false`)。
+  - mechanism:传播/整合、eligibility、reward/supervised learning、capture/decay、exploration selection;`decayProtected` 只跳过 stableDecay,不跳过 fastDecay/learning/effectiveWeight。
+  - task/environment:scenario、observation、expectedAction、world step、reward/terminal;不 import synapse/plasticity/export/audit。
+  - runner:train/eval loop、epochProbe、trace/result aggregation。
+  - diagnostics/report:audit 读取 metrics/diagnostics,报告只格式化事实,不反向驱动机制。
+  - export/IO:snapshot shape/write/read;loader 从 topology blueprint skeleton 恢复,旧 snapshot 缺 `decayProtected` 时保留 blueprint 默认。
+
+### 参数/机制分类表
+| 类别 | 当前归属 | 说明 |
+| --- | --- | --- |
+| 阈值(thresholds) | `branchLocalThreshold`,`dendriteGateThreshold`,`axonThreshold`,`stableThreshold`,`useThreshold`,`contributionThreshold`,`weakWeightThreshold`,`negativeThreshold`,`inhibitionFreezeThreshold` | 判定门槛,不是结构线本身。 |
+| 固定结构属性(structural) | topology blueprint 节点/边、slot limits、growth/cooldown 字段、`Synapse.decayProtected` | `decayProtected` 是固定结构 stem 属性,不是学习率或 reward 参数。 |
+| 学习时间尺度(learningDynamics) | `fastDecay`,`stableDecay`,`eligibilityDecay`,`traceDecay`,`fastLearningRate`,`stableCaptureRate`,`supervisedLearningRate`,`rewardAdvantageBaselineAlpha`,`depotentiationRate` | 控制 fast/stable/trace/baseline 变化速度。 |
+| 信息因子(signal/exploration) | `explorationStrategy`,`explorationEpsilon`,observation dropout,spike-count duration | 决定 learner 看见什么动作/观测证据。 |
+| 训练协议(experimentDefaults/runner) | seeds、epochs、maxSteps、learningMode、reverseMapping、epochProbe | 由 task/runner/audit 提供,不混入机制。 |
+| audit gate/diagnostics | required/diagnostic 标记、success/noop/conflict、wrong-prior、collapse、long-range cliff | 只读解释层;不能把 report 文案当机制事实。 |
+
 ### 2D-challenge(`requiredPassed=true`)
 - supervised: SR=1.0,meanReward=1.05,conflictRate=0
 - rewardOnly(advantage 更新后): **SR=0.5,meanReward=0.55,conflictRate=0,noopRate=0.857**

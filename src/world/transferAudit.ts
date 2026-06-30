@@ -15,6 +15,7 @@ import {
   runChallengeExperiment,
   sameActionCompositeChallengeScenario
 } from "./challenge2d";
+import { dumpWrongPriorSynapseState } from "./diagnostics";
 
 export interface TransferAuditReport {
   version: string;
@@ -651,83 +652,5 @@ function auditWrongPriorDiagnostic(
       "Observed 15-cell epoch curve: 1 epoch fails uniformly, 2 epochs partially recover, 3 epochs recover to fresh-level success; stable depotentiation is fast, wrong-direction fastWeight decays over 2-3 epochs.",
       "If separation>=0 across all matrix cells, the task is too trivially unlearnable; document as structural limitation, do not promote to gate."
     ]
-  };
-}
-
-interface WrongPriorSynapseDump {
-  wrongDirectionStableCount: number;
-  wrongDirectionMaxStableWeight: number;
-  wrongDirectionMaxFastWeight: number;
-  correctDirectionMaxFastWeight: number;
-}
-
-const CORRECT_MOTOR_FOR_INTER: Record<string, string> = {
-  iFoodLeft: "leftMotor",
-  iFoodRight: "rightMotor",
-  iToxinLeft: "rightMotor",
-  iToxinRight: "leftMotor"
-};
-
-function dumpWrongPriorSynapseState(
-  network: LearningNetwork,
-  config: ModelConfig
-): WrongPriorSynapseDump {
-  const interToMotor = network.synapses.filter((synapse) => {
-    const pre = network.neurons.find((neuron) => neuron.id === synapse.preNeuronId);
-    const post = network.neurons.find((neuron) => neuron.id === synapse.postNeuronId);
-    return pre?.role === "interneuron" && post?.role === "motor";
-  });
-
-  const lines: string[] = [];
-  lines.push("");
-  lines.push("=== wrong-prior synapse state dump (interneuron -> motor) ===");
-  lines.push(`maxWeight=${config.maxWeight} stableThreshold=${config.stableThreshold} stableDecay=${config.stableDecay}`);
-  lines.push(`supervisedLearningRate=${config.supervisedLearningRate} stableCaptureRate=${config.stableCaptureRate} fastDecay=${config.fastDecay}`);
-
-  let wrongDirectionStableCount = 0;
-  let wrongDirectionMaxStableWeight = 0;
-  let wrongDirectionMaxFastWeight = 0;
-  let correctDirectionMaxFastWeight = 0;
-
-  for (const synapse of interToMotor) {
-    const correctMotor = CORRECT_MOTOR_FOR_INTER[synapse.preNeuronId];
-    const isWrongDirection = correctMotor !== undefined && synapse.postNeuronId !== correctMotor;
-    const direction = isWrongDirection ? "WRONG" : "CORRECT";
-    const stableCaptured = synapse.stableWeight >= config.stableThreshold;
-
-    if (isWrongDirection) {
-      if (stableCaptured) {
-        wrongDirectionStableCount += 1;
-      }
-      wrongDirectionMaxStableWeight = Math.max(wrongDirectionMaxStableWeight, synapse.stableWeight);
-      wrongDirectionMaxFastWeight = Math.max(wrongDirectionMaxFastWeight, synapse.fastWeight);
-    } else {
-      correctDirectionMaxFastWeight = Math.max(correctDirectionMaxFastWeight, synapse.fastWeight);
-    }
-
-    lines.push(
-      `  ${synapse.preNeuronId}->${synapse.postNeuronId} [${direction}] ` +
-        `fast=${synapse.fastWeight.toFixed(4)} stable=${synapse.stableWeight.toFixed(4)} ` +
-        `eff=${synapse.effectiveWeight.toFixed(4)} state=${synapse.state} ` +
-        `recentUse=${synapse.recentUse.toFixed(4)} recentContrib=${synapse.recentContribution.toFixed(4)} ` +
-        `stabilityScore=${synapse.stabilityScore.toFixed(4)}${stableCaptured ? " STABLE-CAPTURED" : ""}`
-    );
-  }
-
-  lines.push("--- summary ---");
-  lines.push(`wrong-direction: stableCount=${wrongDirectionStableCount}/4 maxStable=${wrongDirectionMaxStableWeight.toFixed(4)} maxFast=${wrongDirectionMaxFastWeight.toFixed(4)}`);
-  lines.push(`correct-direction: maxFast=${correctDirectionMaxFastWeight.toFixed(4)}`);
-  lines.push(`dualLock=${wrongDirectionStableCount > 0} (if true, stableWeight drives wrong motor even after fastWeight unlearn)`);
-  lines.push("=== end dump ===");
-
-  if (process.env.DEBUG_WRONG_PRIOR_DUMP === "1") {
-    process.stderr.write(lines.join("\n") + "\n");
-  }
-
-  return {
-    wrongDirectionStableCount,
-    wrongDirectionMaxStableWeight,
-    wrongDirectionMaxFastWeight,
-    correctDirectionMaxFastWeight
   };
 }

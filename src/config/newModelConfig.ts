@@ -1,7 +1,9 @@
 export interface ModelConfig {
+  // Experiment clocking / smoothing defaults.
   dt: number;
   emaAlpha: number;
 
+  // Threshold and gate dynamics.
   leak: number;
   branchLocalThreshold: number;
   dendriteGateThreshold: number;
@@ -15,6 +17,7 @@ export interface ModelConfig {
   inhibitionShuntScale: number;
   inhibitionFreezeThreshold: number;
 
+  // Learning dynamics and weight timescales.
   fastWeightInit: number;
   stableWeightInit: number;
   maxWeight: number;
@@ -49,6 +52,9 @@ export interface ModelConfig {
   depotentiationRate: number;
   negativeThreshold: number;
 
+  // Structural growth / topology limits.
+  // Synapse.decayProtected is also a structural property. It is intentionally
+  // stored on fixed topology edges rather than in ModelConfig.
   connectionDistanceLambda: number;
   connectionThreshold: number;
   candidateMaxAge: number;
@@ -63,6 +69,66 @@ export interface ModelConfig {
   motorMaxInputs: number;
   motorMaxOutputs: number;
 }
+
+export type ConfigCategory =
+  | "structural"
+  | "thresholds"
+  | "learningDynamics"
+  | "exploration"
+  | "experimentDefaults"
+  | "auditThresholds";
+
+export const configFieldGroups = Object.freeze({
+  structural: [
+    "connectionDistanceLambda",
+    "connectionThreshold",
+    "candidateMaxAge",
+    "minConnectionAge",
+    "dormantLimit",
+    "baseCooldown",
+    "sensoryMaxInputs",
+    "sensoryMaxOutputs",
+    "interneuronMaxInputs",
+    "interneuronMaxOutputs",
+    "motorMaxInputs",
+    "motorMaxOutputs"
+  ],
+  thresholds: [
+    "branchLocalThreshold",
+    "dendriteGateThreshold",
+    "axonThreshold",
+    "thresholdMin",
+    "thresholdMax",
+    "inhibitionFreezeThreshold",
+    "weakWeightThreshold",
+    "stableThreshold",
+    "useThreshold",
+    "contributionThreshold",
+    "negativeThreshold"
+  ],
+  learningDynamics: [
+    "leak",
+    "refractorySteps",
+    "thresholdAdaptRate",
+    "targetSpikeRate",
+    "inhibitionShuntScale",
+    "fastWeightInit",
+    "stableWeightInit",
+    "maxWeight",
+    "eligibilityDecay",
+    "traceDecay",
+    "fastLearningRate",
+    "rewardAdvantageBaselineAlpha",
+    "supervisedLearningRate",
+    "stableCaptureRate",
+    "fastDecay",
+    "stableDecay",
+    "depotentiationRate"
+  ],
+  exploration: ["explorationStrategy", "explorationEpsilon"],
+  experimentDefaults: ["dt", "emaAlpha"],
+  auditThresholds: []
+}) satisfies Readonly<Record<ConfigCategory, readonly (keyof ModelConfig)[]>>;
 
 export const defaultConfig: ModelConfig = Object.freeze({
   dt: 0.01,

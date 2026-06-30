@@ -1,7 +1,8 @@
 import { ModelConfig, withConfig } from "../config/newModelConfig";
-import { LearningNetwork, createOfflineLearningNetwork } from "../core/evaluation";
+import type { LearningNetwork } from "../core/evaluation";
 import { Neuron, resetNeuronRuntime } from "../core/neuron";
 import { refreshSynapseWeights, Synapse } from "../core/synapse";
+import { createLearningNetworkFromBlueprint, offlineLearningTopologyBlueprint } from "../core/topologyBlueprint";
 import { NetworkExport } from "./networkExport";
 
 interface SnapshotNeuron {
@@ -36,7 +37,7 @@ export function loadNetworkFromExport(snapshot: NetworkExport): {
   }
 
   const config = withConfig(snapshot.config);
-  const network = createOfflineLearningNetwork(config);
+  const network = createLearningNetworkFromBlueprint(offlineLearningTopologyBlueprint, config);
 
   validateStructure(snapshot, network);
 
@@ -143,10 +144,7 @@ function applySynapseState(target: Synapse[], source: Synapse[]): void {
     synapse.reconnectCooldown = snap.reconnectCooldown;
     synapse.pruneMark = snap.pruneMark;
     synapse.stabilityScore = snap.stabilityScore;
-    // Preserve the structural-stem flag (older snapshots written before this
-    // field default to false; the skeleton rebuilt by createOfflineLearningNetwork
-    // already carries the correct value, so only overwrite when the snapshot
-    // actually records it).
+    // Preserve blueprint structural defaults for older snapshots that lack this field.
     if (typeof snap.decayProtected === "boolean") {
       synapse.decayProtected = snap.decayProtected;
     }
