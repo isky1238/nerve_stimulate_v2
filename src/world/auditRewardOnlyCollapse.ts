@@ -27,12 +27,14 @@ const CHALLENGE_COLLAPSE_SEED = 21;
  * for COLLAPSE_EPOCHS epochs and samples, per epoch, the bilateral motor fastWeight
  * symmetry (leftFastSum / rightFastSum / asymmetry) and the training-step conflict /
  * noop rates. After training it evaluates the same network frozen on Family A
- * (expected ~1.0/0/0 — advantage broke the collapse) and on multi-object composite
- * scenarios (Families B/C/D, expected ~0.5/0.3125 — residual conflict).
+ * (expected ~1.0/0/0) and on multi-object composite scenarios (Families B/C/D,
+ * expected ~0.5/0.3125 — residual conflict).
  *
- * The contrast answers whether advantage's fastWeight depotentiation broke bilateral
- * co-enhancement for Family A, and whether the residual multi-object conflict is
- * still a bilateral-symmetry artifact.
+ * A/B-verified reading (the "bilateral co-enhancement" hypothesis is refuted):
+ * Family A resolves via spike-count arbitration with asymmetry staying low (~0.04),
+ * NOT via advantage selecting one side; the residual multi-object conflict is a
+ * compositional vote-tie, not a bilateral-symmetry artifact. The asymmetry series is
+ * kept as a regression baseline, not as evidence of side-selection.
  */
 export function runRewardOnlyCollapseAudit(config: ModelConfig = defaultConfig): string {
   const complexConfig = createComplexConfig(config);
@@ -69,11 +71,15 @@ export function runRewardOnlyCollapseAudit(config: ModelConfig = defaultConfig):
 /**
  * RewardOnly challenge-collapse diagnostic. Same probe as the complex version but
  * on 2D-challenge (binary, single-tick, maxSteps=12) where rewardOnly is known to
- * fail by NOOP (noopRate~0.857) rather than by conflict. Samples per-epoch bilateral
- * motor fastWeight symmetry + training conflict/noop rates.
+ * fail by NOOP (evalNoopRate~0.857) rather than by conflict. Samples per-epoch
+ * bilateral motor fastWeight symmetry + training conflict/noop rates.
  *
- * Contrast with the complex collapse audit isolates the failure-mode split: challenge
- * = bilateral mutual-cancellation -> noop, complex = bilateral co-firing -> conflict.
+ * A/B-verified cause of the challenge noop (NOT bilateral mutual-cancellation):
+ * fastWeight decays below the motor threshold under advantage's net-negative delta,
+ * while conflict-gated exploration forces a motor during training and masks the noop
+ * (trainNoop=0); frozen eval exposes it. The complex audit's residual multi-object
+ * conflict is a compositional vote-tie, not bilateral co-firing. The two failure
+ * modes are mechanistically distinct and must not be read through one bilateral lens.
  */
 export function runRewardOnlyChallengeCollapseAudit(config: ModelConfig = defaultConfig): string {
   const challengeConfig = createChallengeConfig(config);

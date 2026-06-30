@@ -40,8 +40,10 @@ export function formatRewardOnlyChallengeCollapseReport(
         `right ${fmt(first.rightFastSum)} -> ${fmt(last.rightFastSum)}, ` +
         `asymmetry ${fmt(first.fastAsymmetry)} -> ${fmt(last.fastAsymmetry)}`
     );
-    lines.push("  - High trainNoopRate sustained (~0.85) with low asymmetry: bilateral pathways mutually cancel");
-    lines.push("    below motor threshold -> noop. Advantage did NOT break this; commit-then-no-explore locks it in.");
+    lines.push("  - High evalNoopRate (~0.85) with trainNoopRate~0: NOT bilateral mutual-cancellation.");
+    lines.push("    Real cause (A/B-verified): fastWeight decays below motor threshold under advantage's");
+    lines.push("    net-negative delta, while conflict-gated exploration forces a motor during training and");
+    lines.push("    MASKS the noop (trainNoop=0); frozen eval exposes it. Low asymmetry is expected, not the bug.");
     lines.push("  - If asymmetry grows and noop drops: advantage selected one side -> noop resolved.");
   }
   return lines.join("\n");
