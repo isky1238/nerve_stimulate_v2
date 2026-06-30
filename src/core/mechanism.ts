@@ -7,6 +7,7 @@ import {
   applySupervisedMotorLearning,
   captureStableWeights,
   decayWeights,
+  normalizeEligibility,
   updateEligibility
 } from "./plasticity";
 import { SeededRandom } from "./random";
@@ -64,7 +65,24 @@ export function propagateAndIntegrateRole(
 }
 
 export function updateNetworkEligibility(network: LearningNetwork, config: ModelConfig): void {
-  updateEligibility(network.synapses, indexNeurons(network.neurons), config);
+  const neuronsById = indexNeurons(network.neurons);
+  updateEligibility(network.synapses, neuronsById, config);
+  // Phase 2: per-post-spike divisive normalization of positive (LTP) eligibility.
+  // Bounded total LTP credit per post-spike counters the normal-summation risk.
+  if (config.eligibilityNormalization) {
+    normalizeEligibility(network.synapses, neuronsById);
+  }
+}
+
+/**
+ * Phase 2: reward-derived modulator. A global scalar in [0,1] expressing how much
+ * the current reward advantage should gate plasticity. rewardOnly: advantage≈0 →
+ * modulator≈0 (no learning signal); large |advantage| → 1 (full learning). The sign
+ * is already carried by rewardSignal (advantage), so the modulator only encodes
+ * intensity. supervised callers pass modulator=1 (explicit target, no modulation).
+ */
+export function computeModulator(rewardAdvantage: number, config: ModelConfig): number {
+  return Math.tanh(Math.abs(rewardAdvantage) * config.modulatorGain);
 }
 
 export function applyRewardOutcomeLearning(
@@ -72,7 +90,14 @@ export function applyRewardOutcomeLearning(
   rewardAdvantage: number,
   config: ModelConfig
 ): number {
-  return applyRewardLearning(network.synapses, indexNeurons(network.neurons), rewardAdvantage, config).length;
+  const modulator = computeModulator(rewardAdvantage, config);
+  return applyRewardLearning(
+    network.synapses,
+    indexNeurons(network.neurons),
+    rewardAdvantage,
+    modulator,
+    config
+  ).length;
 }
 
 export function applySupervisedMotorOutcomeLearning(
@@ -87,11 +112,13 @@ export function applySupervisedMotorOutcomeLearning(
     return 0;
   }
 
+  // Supervised has an explicit target signal; modulator is 1 (no reward-derived gating).
   return applySupervisedMotorLearning(
     network.synapses,
     indexNeurons(network.neurons),
     targetMotorId,
     activeMotors,
+    1,
     config
   ).length;
 }

@@ -375,6 +375,7 @@ function runAuditTrial(
       neuronsById,
       pattern.expectedMotorId,
       activeMotorSet,
+      1,
       config
     ).length;
     captureUpdates = captureStableWeights(network.synapses, config).length;

@@ -477,7 +477,7 @@ function runMappingTrial(
   const correct = activeMotorSet.has(pattern.targetMotorId) && activeMotorSet.size === 1;
 
   if (learningOn) {
-    applySupervisedMotorLearning(network.synapses, neuronsById, pattern.targetMotorId, activeMotorSet, config);
+    applySupervisedMotorLearning(network.synapses, neuronsById, pattern.targetMotorId, activeMotorSet, 1, config);
     captureStableWeights(network.synapses, config);
   }
 

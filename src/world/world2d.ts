@@ -426,6 +426,7 @@ function runNetworkForSensors(
       neuronsById,
       targetMotorId,
       activeMotorSet,
+      1,
       config
     ).length;
     captureUpdates = captureStableWeights(network.synapses, config).length;

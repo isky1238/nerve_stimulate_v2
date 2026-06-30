@@ -297,7 +297,7 @@ function runTraceTrial(
   if (learningOn) {
     weightEvents.push(
       ...recordWeightEvents(network, neuronsById, pattern.targetMotorId, activeMotors, () =>
-        applySupervisedMotorLearning(network.synapses, neuronsById, pattern.targetMotorId, activeMotorSet, config)
+        applySupervisedMotorLearning(network.synapses, neuronsById, pattern.targetMotorId, activeMotorSet, 1, config)
       )
     );
     weightEvents.push(

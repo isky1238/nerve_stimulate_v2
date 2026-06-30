@@ -120,6 +120,7 @@ export function applyRewardLearning(
   synapses: Synapse[],
   neuronsById: Map<string, Neuron>,
   rewardSignal: number,
+  modulator: number,
   config: ModelConfig
 ): LearningEvent[] {
   const events: LearningEvent[] = [];
@@ -133,7 +134,11 @@ export function applyRewardLearning(
     const branch = post?.branches.find((candidate) => candidate.id === synapse.postBranchId);
     const plasticityGate = branch?.plasticityGate ?? 1;
     const before = synapse.fastWeight;
-    const delta = config.fastLearningRate * rewardSignal * synapse.eligibilityTrace * plasticityGate;
+    // Phase 2: modulator (reward-derived intensity) composes with the binary
+    // inhibition-freeze plasticityGate. rewardSignal (advantage) carries the sign;
+    // signed eligibilityTrace carries the LTP/LTD credit. Their product gives the
+    // four-quadrant update; modulator scales how strongly this step learns at all.
+    const delta = config.fastLearningRate * rewardSignal * synapse.eligibilityTrace * plasticityGate * modulator;
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
     refreshSynapseWeight(synapse, config);
 
@@ -155,6 +160,7 @@ export function applySupervisedMotorLearning(
   neuronsById: Map<string, Neuron>,
   targetMotorId: string,
   activeMotorIds: Set<string>,
+  modulator: number,
   config: ModelConfig
 ): LearningEvent[] {
   const events: LearningEvent[] = [];
@@ -176,9 +182,11 @@ export function applySupervisedMotorLearning(
     const isTarget = post.id === targetMotorId;
     const wasWronglyActive = !isTarget && activeMotorIds.has(post.id);
     const before = synapse.fastWeight;
+    // modulator is 1 for supervised (explicit target), kept in the formula for
+    // symmetry with rewardOnly and future reward-driven supervised variants.
     const delta = isTarget
-      ? config.supervisedLearningRate * plasticityGate
-      : -config.supervisedLearningRate * (wasWronglyActive ? 1 : 0.7) * plasticityGate;
+      ? config.supervisedLearningRate * plasticityGate * modulator
+      : -config.supervisedLearningRate * (wasWronglyActive ? 1 : 0.7) * plasticityGate * modulator;
 
     synapse.fastWeight = clampMagnitude(synapse.fastWeight + delta, 0, config.maxWeight);
 
@@ -190,7 +198,7 @@ export function applySupervisedMotorLearning(
       // LTD); the depotentiation magnitude uses |eligibilityTrace| so the sign cannot
       // shield a wrong-direction stable synapse from depotentiation.
       const stableBefore = synapse.stableWeight;
-      const stableDelta = -config.depotentiationRate * Math.abs(synapse.eligibilityTrace) * plasticityGate;
+      const stableDelta = -config.depotentiationRate * Math.abs(synapse.eligibilityTrace) * plasticityGate * modulator;
       synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
       if (synapse.stableWeight < config.stableThreshold) {
         synapse.state = "active";
