@@ -28,7 +28,8 @@
     "audit:rewardonly:weight-map": "node scripts/longrange_checkpoint_probe.cjs weights",
     "audit:rewardonly:checkpoint-probe": "node scripts/longrange_checkpoint_probe.cjs path",
     "audit:topology-family": "npm run build && node scripts/topology_family_probe.cjs",
-    "audit:topology-development": "npm run build && node scripts/topology_development_probe.cjs"
+    "audit:topology-development": "npm run build && node scripts/topology_development_probe.cjs",
+    "audit:asymmetric-valence": "npm run build && node scripts/asymmetric_valence_probe.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.7",

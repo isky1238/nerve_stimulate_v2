@@ -41,6 +41,16 @@ import { formatTransferAuditReport, runTransferAudit } from "../src/world/transf
 import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
 import { tryFormConnections, updateConnectionStates } from "../src/core/development";
 import { SeededRandom } from "../src/core/random";
+import {
+  activeMotorIds,
+  applyMaintenanceDecayAndCapture,
+  applyRewardOutcomeLearning,
+  clearSensoryOutputs,
+  propagateAndIntegrateRole,
+  resetNetworkRuntime,
+  setSensoryOutputs,
+  updateNetworkEligibility
+} from "../src/core/mechanism";
 
 function assertClose(actual: number, expected: number, tolerance = 1e-12): void {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} !== ${expected}`);
@@ -638,4 +648,249 @@ test("developmental pairMemory tombstone blocks immediate re-formation after pru
   // A tombstone for the pruned pair should now block re-formation within cooldown.
   const blocked = tryFormConnections(network.neurons, network.synapses, network.pairMemory, 2, defaultConfig, rng, 8);
   assert.ok(blocked.tombstoneHit > 0, "expected tombstone to block immediate re-formation");
+});
+
+// ---------------------------------------------------------------------------
+// Asymmetric valence 1D probe (toxin = tagged negative reward, nutrient = no
+// reward). These tests pin the task semantics the probe relies on: sensory
+// grouping, motor->contact mapping, and the asymmetric reward (toxin depresses
+// its motor pathway, nutrient leaves its pathway unchanged).
+// ---------------------------------------------------------------------------
+
+// Shared config for the valence tests: baseline alpha 0 so nutrient = exactly 0
+// reward signal (no hidden credit via baseline drift), aversive bonus 0 so
+// nutrient never gets a positive bonus.
+function createValenceTestConfig() {
+  return withConfig({
+    ...defaultConfig,
+    leak: 1,
+    branchLocalThreshold: 0.1,
+    dendriteGateThreshold: 0.1,
+    axonThreshold: 1,
+    thresholdAdaptRate: 0,
+    refractorySteps: 0,
+    fastDecay: 0.9995,
+    stableThreshold: 0.12,
+    useThreshold: 0.08,
+    depotentiationRate: 0.64,
+    aversiveTagStrategy: "badOutcomeDepotentiation",
+    aversiveTagGain: 0,
+    aversiveAvoidanceBonus: 0,
+    aversiveDepotentiationRate: 0.5,
+    aversiveBadOutcomeThreshold: 0,
+    rewardAdvantageBaselineAlpha: 0
+  });
+}
+
+function buildValenceNetwork(variant: "prewired" | "stem", config: ReturnType<typeof createValenceTestConfig>) {
+  const n = 2;
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 2 * n,
+    mediumCount: 10,
+    outputCount: 2,
+    synapsesPerInput: 5,
+    synapsesPerMedium: 1,
+    readoutMode: variant
+  });
+  const network = createLearningNetworkFromBlueprint(topology, config);
+  const toxinImpulseIds = Array.from({ length: n }, (_, i) => `input${i}`);
+  const nutrientImpulseIds = Array.from({ length: n }, (_, i) => `input${n + i}`);
+  const centerIds = new Set([...toxinImpulseIds, ...nutrientImpulseIds]);
+  return { network, n, toxinImpulseIds, nutrientImpulseIds, centerIds, leftMotorId: "output0", rightMotorId: "output1" };
+}
+
+function motorReadoutEff(network: { neurons: Array<{ id: string; role: string }>; synapses: Array<{ preNeuronId: string; postNeuronId: string; effectiveWeight: number; state: string }> }, motorId: string): number {
+  const roles = new Map(network.neurons.map((nr) => [nr.id, nr.role]));
+  let sum = 0;
+  for (const s of network.synapses) {
+    if (roles.get(s.preNeuronId) !== "interneuron") continue;
+    if (s.postNeuronId !== motorId) continue;
+    if (s.state === "pruned") continue;
+    sum += s.effectiveWeight;
+  }
+  return sum;
+}
+
+test("valence probe sensory grouping splits 2n inputs into toxin and nutrient impulse groups", () => {
+  const config = createValenceTestConfig();
+  const { n, toxinImpulseIds, nutrientImpulseIds, centerIds } = buildValenceNetwork("prewired", config);
+  assert.equal(n, 2);
+  assert.deepEqual(toxinImpulseIds, ["input0", "input1"]);
+  assert.deepEqual(nutrientImpulseIds, ["input2", "input3"]);
+  // Center fires BOTH groups = direction sensing ("toxin left, nutrient right").
+  assert.equal(centerIds.size, 4);
+  for (const id of [...toxinImpulseIds, ...nutrientImpulseIds]) {
+    assert.ok(centerIds.has(id));
+  }
+});
+
+test("valence probe maps motors to contacts: output0=left=toxin, output1=right=nutrient", () => {
+  // output0 -> left -> toxin contact; output1 -> right -> nutrient contact.
+  // Verified indirectly: forcing output0 and contacting toxin depresses the
+  // output0 (toxin) readout, not output1.
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds, leftMotorId, rightMotorId } = ctx;
+
+  const beforeLeft = motorReadoutEff(network, leftMotorId);
+  const beforeRight = motorReadoutEff(network, rightMotorId);
+
+  // Run several trials where we force the LEFT (toxin) motor: negative reward
+  // + badOutcome tag should depress the left/toxin readout, leave right alone.
+  const baseline = { baseline: 0 };
+  const rng = new SeededRandom(11);
+  for (let i = 0; i < 40; i += 1) {
+    resetNetworkRuntime(network);
+    setSensoryOutputs(network, centerIds);
+    propagateAndIntegrateRole(network, "interneuron", config);
+    clearSensoryOutputs(network);
+    propagateAndIntegrateRole(network, "motor", config);
+    // Force left motor (toxin contact).
+    for (const nr of network.neurons) {
+      if (nr.role === "motor") {
+        nr.outputSignal = nr.id === leftMotorId ? 1 : 0;
+        nr.spike = nr.id === leftMotorId;
+      }
+    }
+    updateNetworkEligibility(network, config);
+    applyRewardOutcomeLearning(network, -1, config, { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 });
+    baseline.baseline = baseline.baseline * (1 - config.rewardAdvantageBaselineAlpha) + (-1) * config.rewardAdvantageBaselineAlpha;
+    applyMaintenanceDecayAndCapture(network, config);
+  }
+
+  const afterLeft = motorReadoutEff(network, leftMotorId);
+  const afterRight = motorReadoutEff(network, rightMotorId);
+  assert.ok(beforeLeft > 0, "expected non-zero toxin readout before");
+  assert.ok(afterLeft < beforeLeft, `toxin (left) readout should depress after repeated toxin contact: ${beforeLeft} -> ${afterLeft}`);
+  // Nutrient (right) readout should NOT be reinforced by toxin contacts; with
+  // baseline alpha 0 it gets no LTP signal. It may decay slightly but must not
+  // exceed its pre-trial value.
+  assert.ok(afterRight <= beforeRight + 1e-9, `nutrient (right) readout must not gain credit from toxin contact: ${beforeRight} -> ${afterRight}`);
+});
+
+test("valence probe nutrient contact yields zero reward signal (no credit channel)", () => {
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds, rightMotorId, leftMotorId } = ctx;
+
+  const beforeRight = motorReadoutEff(network, rightMotorId);
+
+  // Force the RIGHT (nutrient) motor repeatedly: nutrient contact = reward 0,
+  // no aversive tag. With baseline alpha 0, rewardAdvantage = 0 -> rewardSignal
+  // = 0 -> modulator = 0 -> no LTP/LTD. Only maintenance decay acts (uniform).
+  const rng = new SeededRandom(13);
+  for (let i = 0; i < 40; i += 1) {
+    resetNetworkRuntime(network);
+    setSensoryOutputs(network, centerIds);
+    propagateAndIntegrateRole(network, "interneuron", config);
+    clearSensoryOutputs(network);
+    propagateAndIntegrateRole(network, "motor", config);
+    for (const nr of network.neurons) {
+      if (nr.role === "motor") {
+        nr.outputSignal = nr.id === rightMotorId ? 1 : 0;
+        nr.spike = nr.id === rightMotorId;
+      }
+    }
+    updateNetworkEligibility(network, config);
+    applyRewardOutcomeLearning(network, 0, config, undefined);
+    applyMaintenanceDecayAndCapture(network, config);
+  }
+
+  const afterRight = motorReadoutEff(network, rightMotorId);
+  // Nutrient readout must not GAIN credit (no positive reward). It may decay.
+  assert.ok(afterRight <= beforeRight + 1e-9, `nutrient readout must not gain credit with zero reward: ${beforeRight} -> ${afterRight}`);
+  // And it should not be depressed below what uniform decay does to the toxin
+  // side (no negative signal). Sanity: still positive (decay alone over 40 steps
+  // with fastDecay 0.9995 leaves most of the weight).
+  assert.ok(afterRight > 0, `nutrient readout should survive decay-only: ${afterRight}`);
+  void leftMotorId;
+  void rng;
+});
+
+test("valence probe prewired develops avoidance-driven nutrient approach", () => {
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds, leftMotorId, rightMotorId } = ctx;
+  const rng = new SeededRandom(21);
+  const baseline = { baseline: 0 };
+
+  // Train: each trial, sense center, read motor, force-explore on noop/conflict,
+  // apply asymmetric reward (toxin=-1+tag, nutrient=0).
+  for (let epoch = 0; epoch < 200; epoch += 1) {
+    for (let t = 0; t < 20; t += 1) {
+      resetNetworkRuntime(network);
+      setSensoryOutputs(network, centerIds);
+      propagateAndIntegrateRole(network, "interneuron", config);
+      clearSensoryOutputs(network);
+      propagateAndIntegrateRole(network, "motor", config);
+      let active = activeMotorIds(network);
+      let contact: "toxin" | "nutrient" | null = null;
+      const leftOn = active.includes(leftMotorId);
+      const rightOn = active.includes(rightMotorId);
+      if (leftOn && rightOn) {
+        // conflict -> explore
+        const forced = rng.next() < 0.5 ? leftMotorId : rightMotorId;
+        for (const nr of network.neurons) {
+          if (nr.role === "motor") {
+            nr.outputSignal = nr.id === forced ? 1 : 0;
+            nr.spike = nr.id === forced;
+          }
+        }
+        contact = forced === leftMotorId ? "toxin" : "nutrient";
+      } else if (leftOn) {
+        contact = "toxin";
+      } else if (rightOn) {
+        contact = "nutrient";
+      } else {
+        // noop -> explore
+        const forced = rng.next() < 0.5 ? leftMotorId : rightMotorId;
+        for (const nr of network.neurons) {
+          if (nr.role === "motor") {
+            nr.outputSignal = nr.id === forced ? 1 : 0;
+            nr.spike = nr.id === forced;
+          }
+        }
+        contact = forced === leftMotorId ? "toxin" : "nutrient";
+      }
+      updateNetworkEligibility(network, config);
+      if (contact === "toxin") {
+        applyRewardOutcomeLearning(network, -1, config, { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 });
+      } else {
+        applyRewardOutcomeLearning(network, 0, config, undefined);
+      }
+      baseline.baseline = 0;
+      applyMaintenanceDecayAndCapture(network, config);
+    }
+  }
+
+  // Frozen eval: native choice with no exploration.
+  resetNetworkRuntime(network);
+  setSensoryOutputs(network, centerIds);
+  propagateAndIntegrateRole(network, "interneuron", config);
+  clearSensoryOutputs(network);
+  propagateAndIntegrateRole(network, "motor", config);
+  const active = activeMotorIds(network);
+  const toxinEff = motorReadoutEff(network, leftMotorId);
+  const nutrEff = motorReadoutEff(network, rightMotorId);
+  // Avoidance-driven approach: toxin readout depressed below nutrient readout.
+  assert.ok(toxinEff < nutrEff, `expected toxin readout < nutrient readout after training: toxin=${toxinEff} nutr=${nutrEff}`);
+  // And the network should not be choosing the toxin side.
+  assert.ok(!active.includes(leftMotorId) || active.includes(rightMotorId), `expected no toxin-side preference; active=${active.join(",")}`);
+});
+
+test("valence probe stem variant forms candidate readouts (developmental wiring works)", () => {
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("stem", config);
+  const { network } = ctx;
+  const devRng = new SeededRandom(21 + 7919);
+  // One developmental step should grow inter->motor readout candidates.
+  const before = network.synapses.length;
+  const formed = tryFormConnections(network.neurons, network.synapses, network.pairMemory, network.tick, config, devRng, 8);
+  assert.ok(formed.formed > 0, "expected stem variant to grow readout candidates");
+  assert.ok(network.synapses.length > before);
+  const roles = new Map(network.neurons.map((nr) => [nr.id, nr.role]));
+  const hasReadout = network.synapses.some(
+    (s) => roles.get(s.preNeuronId) === "interneuron" && roles.get(s.postNeuronId) === "motor" && s.state !== "pruned"
+  );
+  assert.equal(hasReadout, true);
 });
