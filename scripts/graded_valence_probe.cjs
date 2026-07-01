@@ -69,6 +69,11 @@ const CHECKPOINTS = new Set(
     .concat(EPOCHS)
 );
 const N = numberEnv("N", 5); // channels per valence; inputCount=2N, mediumCount=5N
+// Asymmetric receptor amplification: N_TOXIN / N_NUTRIENT channels per side.
+// Default = N (symmetric). Nutrient-amplified (N_NUTRIENT > N_TOXIN) tests whether
+// giving approach more sensory drive lets it bootstrap behaviorally.
+const N_TOXIN = numberEnv("N_TOXIN", N);
+const N_NUTRIENT = numberEnv("N_NUTRIENT", N);
 const LINE_LEN = numberEnv("LINE_LEN", 10); // toxin at 0, nutrient at LINE_LEN
 const MAX_STEPS = numberEnv("MAX_STEPS", LINE_LEN + 2);
 const TAGGED_MODE = process.env.TAGGED_MODE || "taggedImpulse";
@@ -106,16 +111,17 @@ function createProbeConfig() {
 }
 
 function sensoryGroups() {
-  const toxinImpulseIds = Array.from({ length: N }, (_, i) => `input${i}`);
-  const nutrientImpulseIds = Array.from({ length: N }, (_, i) => `input${N + i}`);
+  const toxinImpulseIds = Array.from({ length: N_TOXIN }, (_, i) => `input${i}`);
+  const nutrientImpulseIds = Array.from({ length: N_NUTRIENT }, (_, i) => `input${N_TOXIN + i}`);
   return { toxinImpulseIds, nutrientImpulseIds };
 }
 
 // Population-coded concentration: k of n channels fire at distance dist.
 // k = clamp(round(n/(1+dist)), 0, n). dist 0 -> n (max), grows -> fewer.
-function channelCount(dist) {
-  const k = Math.round(N / (1 + dist));
-  return Math.max(0, Math.min(N, k));
+// n is per-side (asymmetric receptor amplification).
+function channelCount(dist, n) {
+  const k = Math.round(n / (1 + dist));
+  return Math.max(0, Math.min(n, k));
 }
 
 function motorSemantics() {
@@ -173,8 +179,8 @@ function runEpisode(network, ctx, config, rng, baselineState, explore) {
   for (let step = 0; step < MAX_STEPS; step += 1) {
     const distToxin = agentX;
     const distNutrient = LINE_LEN - agentX;
-    const kT = channelCount(distToxin);
-    const kN = channelCount(distNutrient);
+    const kT = channelCount(distToxin, N_TOXIN);
+    const kN = channelCount(distNutrient, N_NUTRIENT);
     const activeToxin = ctx.toxinImpulseIds.slice(0, kT);
     const activeNutrient = ctx.nutrientImpulseIds.slice(0, kN);
     const activeAll = new Set([...activeToxin, ...activeNutrient]);
@@ -228,8 +234,8 @@ function runEpisode(network, ctx, config, rng, baselineState, explore) {
 function runSeed(seed) {
   const config = createProbeConfig();
   const topology = createNearestLayeredTopologyBlueprint({
-    inputCount: 2 * N,
-    mediumCount: 5 * N,
+    inputCount: N_TOXIN + N_NUTRIENT,
+    mediumCount: 5 * Math.max(N_TOXIN, N_NUTRIENT),
     outputCount: 2,
     synapsesPerInput: 5,
     synapsesPerMedium: 1,
@@ -310,8 +316,8 @@ function aggregate(results) {
 
 function printReport(report) {
   console.log("\n=== graded valence probe ===");
-  console.log(`N=${N} channels/valence  line=0..${LINE_LEN}  maxSteps=${MAX_STEPS}  taggedMode=${TAGGED_MODE}  toxinReward=${TOXIN_REWARD}`);
-  console.log(`concentration k = clamp(round(${N}/(1+dist)),0,${N})  | toxin@0 (left)  nutrient@${LINE_LEN} (right)`);
+  console.log(`N_toxin=${N_TOXIN} N_nutrient=${N_NUTRIENT}  line=0..${LINE_LEN}  maxSteps=${MAX_STEPS}  taggedMode=${TAGGED_MODE}  toxinReward=${TOXIN_REWARD}`);
+  console.log(`concentration k = clamp(round(n/(1+dist)),0,n) per side  | toxin@0 (left)  nutrient@${LINE_LEN} (right)`);
   console.log("epoch   approach  toxin  stuck  toxinEff  nutrEff  meanSteps");
   for (const r of report.rows) {
     console.log(
@@ -340,12 +346,80 @@ function analyzeNetwork(network, ctx, seed) {
   if (shown === 0) console.log("  (all readouts ~0: nothing consolidated)");
 }
 
+// Per-position single-point stimulation. For each x, activate ONLY the nutrient
+// channels that would fire at that distance (kN), propagate sensory->inter, and
+// measure: which inters fire, each firing inter's eff to nutrient motor, the SUM
+// of firing-inter eff (= actual motor drive, what determines if motor fires), vs
+// the TOTAL nutrEff (sum over ALL inters, firing or not). This tests the
+// population-focus hypothesis: is the 1.77 nutrEff spread across many inters so
+// that at center (kN=1, 1 inter fires) the single firing inter's eff << total and
+// < motor threshold 1.0?
+function firingInterDrive(network, config, activeIds, motorId) {
+  const net = structuredClone(network);
+  resetNetworkRuntime(net);
+  for (const s of net.synapses) s.tagLoad = 0;
+  setSensoryOutputs(net, new Set(activeIds));
+  propagateAndIntegrateRole(net, "interneuron", config);
+
+  const roles = new Map(net.neurons.map((n) => [n.id, n.role]));
+  const firing = [];
+  let driveSum = 0;
+  for (const neuron of net.neurons) {
+    if (neuron.role !== "interneuron" || !neuron.spike) continue;
+    let eff = 0;
+    for (const s of net.synapses) {
+      if (s.preNeuronId !== neuron.id || s.postNeuronId !== motorId) continue;
+      if (s.state === "pruned") continue;
+      eff += s.effectiveWeight;
+    }
+    firing.push({ id: neuron.id, eff });
+    driveSum += eff;
+  }
+  // does the motor actually fire? propagate one more tick
+  clearSensoryOutputs(net);
+  propagateAndIntegrateRole(net, "motor", config);
+  const motor = net.neurons.find((n) => n.id === motorId);
+  return { nFiring: firing.length, firing, driveSum, motorFires: !!(motor && motor.spike) };
+}
+
+function singlePointSweep(network, ctx, config, seed) {
+  console.log(`\n>>> SINGLE-POINT SWEEP seed=${seed} taggedMode=${TAGGED_MODE}`);
+  console.log("  (activate ONLY nutrient channels at each x; measure nutrient-motor drive)");
+  console.log("  x  kN  nFire  driveSum  totalNutrEff  motorFires   firing-inter effs");
+  for (let x = 0; x <= LINE_LEN; x += 1) {
+    const dist = LINE_LEN - x;
+    const kN = channelCount(dist, N_NUTRIENT);
+    const activeNutrient = ctx.nutrientImpulseIds.slice(0, kN);
+    const totalNutrEff = motorReadoutEff(network, ctx.sem.nutrientMotorId);
+    const r = firingInterDrive(network, config, activeNutrient, ctx.sem.nutrientMotorId);
+    const effs = r.firing.map((f) => `${f.id.split("_").pop()}=${fmt(f.eff, 2)}`).join(" ") || "-";
+    console.log(
+      `${String(x).padStart(3)}  ${kN}   ${r.nFiring}    ${fmt(r.driveSum, 3)}    ${fmt(totalNutrEff, 3)}       ${r.motorFires ? "YES" : "no "}        ${effs}`
+    );
+  }
+  // toxin side for contrast
+  console.log("  (activate ONLY toxin channels at each x; measure toxin-motor drive)");
+  console.log("  x  kT  nFire  driveSum  totalToxinEff  motorFires");
+  for (let x = 0; x <= LINE_LEN; x += 1) {
+    const dist = x;
+    const kT = channelCount(dist, N_TOXIN);
+    const activeToxin = ctx.toxinImpulseIds.slice(0, kT);
+    const totalToxinEff = motorReadoutEff(network, ctx.sem.toxinMotorId);
+    const r = firingInterDrive(network, config, activeToxin, ctx.sem.toxinMotorId);
+    console.log(
+      `${String(x).padStart(3)}  ${kT}   ${r.nFiring}    ${fmt(r.driveSum, 3)}    ${fmt(totalToxinEff, 3)}       ${r.motorFires ? "YES" : "no "}`
+    );
+  }
+}
+
 function main() {
   const results = SEEDS.map((seed) => runSeed(seed));
   printReport(aggregate(results));
   if (process.env.ANALYZE === "1") {
     const ctx = { ...sensoryGroups(), sem: motorSemantics() };
+    const config = createProbeConfig();
     analyzeNetwork(results[0].network, ctx, results[0].seed);
+    singlePointSweep(results[0].network, ctx, config, results[0].seed);
   }
   // per-seed final outcome
   console.log("\nper-seed final outcome (A=approach nutrient, T=toxin contact, S=stuck):");
