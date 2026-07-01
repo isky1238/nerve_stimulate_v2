@@ -189,7 +189,8 @@ export function createLearningNetworkFromBlueprint(
     neurons,
     synapses,
     pairMemory: [],
-    tick: 0
+    tick: 0,
+    globalAversiveLoad: 0
   };
 }
 

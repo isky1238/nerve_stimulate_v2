@@ -215,10 +215,24 @@ function motorReadoutEff(network, motorId) {
   return { eff: sum, count };
 }
 
+// Mark toxin sensory neurons' carried tag = 1. This is the tag origin: the
+// aversive (toxin) sensory channel emits a tagged impulse when it fires. The
+// probe defines which sensors are toxin (sensory transduction fact), not a
+// plasticity judgment — the tag then propagates internally along the active
+// path (propagateSynapses/integrateNeuron) without further probe intervention.
+function markToxinTag(network, toxinImpulseIds) {
+  for (const neuron of network.neurons) {
+    if (neuron.role === "sensory" && toxinImpulseIds.includes(neuron.id)) {
+      neuron.tagLoad = 1;
+    }
+  }
+}
+
 // One training trial. explore=true allows force-exploration on noop/conflict.
 function runTrial(network, ctx, config, rng, baselineState, explore) {
   resetNetworkRuntime(network);
   setSensoryOutputs(network, ctx.centerIds);
+  markToxinTag(network, ctx.toxinImpulseIds);
   propagateAndIntegrateRole(network, "interneuron", config);
   clearSensoryOutputs(network);
   propagateAndIntegrateRole(network, "motor", config);
@@ -267,6 +281,7 @@ function evalChoice(network, ctx, config) {
   const clone = structuredClone(network);
   resetNetworkRuntime(clone);
   setSensoryOutputs(clone, ctx.centerIds);
+  markToxinTag(clone, ctx.toxinImpulseIds);
   propagateAndIntegrateRole(clone, "interneuron", config);
   clearSensoryOutputs(clone);
   propagateAndIntegrateRole(clone, "motor", config);

@@ -5,6 +5,25 @@ export type AversiveTagStrategy =
   | "badOutcomeDepotentiation"
   | "combined";
 
+/**
+ * Tagged-impulse depotentiation mode. Replaces the old negative-value channel
+ * (A: reward=-1 × computeRewardFastDelta) and the reverse-term channel
+ * (B: applyAversiveStableDepotentiation) with a "flip accumulation direction"
+ * mechanism: a toxin sensory neuron emits a tagged impulse; the tag rides the
+ * active conduction path (sensory→inter→motor); when it reaches a consolidated
+ * readout synapse, the capture step flips sign (stable→fast de-consolidation).
+ *
+ * - "off": no tagged-impulse depotentiation (baseline; old B channel still
+ *   applies if aversiveTagStrategy is set).
+ * - "taggedImpulse" (variant 2): single factor — tag reaching a readout synapse
+ *   alone flips capture. Self-marking, self-triggering.
+ * - "specificFactor" (variant 1): AND gate — flip requires BOTH the global
+ *   aversive load (specific factor released on toxin detection, sensitizes
+ *   consolidated synapses) AND a tagged impulse locally hitting the synapse.
+ *   The global load lingers (hormone window) after the impulse passes.
+ */
+export type TaggedDepotentiationMode = "off" | "taggedImpulse" | "specificFactor";
+
 export interface ModelConfig {
   // Experiment clocking / smoothing defaults.
   dt: number;
@@ -61,6 +80,24 @@ export interface ModelConfig {
   aversiveTagStrategy: AversiveTagStrategy;
   aversiveTagGain: number;
   aversiveAvoidanceBonus: number;
+  /**
+   * Tagged-impulse depotentiation (replaces A/B channels). See
+   * TaggedDepotentiationMode. When != "off", a toxin sensory neuron's tagLoad
+   * rides the active path and flips capture direction at consolidated readouts.
+   */
+  taggedDepotentiationMode: TaggedDepotentiationMode;
+  /** Tag transfer ratio across a synapse (pre.tagLoad × rate → post). */
+  tagTransferRate: number;
+  /** Per-tick decay of a neuron's carried tagLoad (when not re-driven). */
+  tagDecay: number;
+  /** Gain on the flipped capture amount vs normal capture rate. */
+  taggedCaptureGain: number;
+  /** Variant 1 AND-gate threshold on network.globalAversiveLoad. */
+  globalSensitizationThreshold: number;
+  /** Per-tick decay of the global aversive load (hormone window). */
+  globalAversiveLoadDecay: number;
+  /** Increment to globalAversiveLoad per toxin sensory firing. */
+  globalAversiveLoadIncrement: number;
   fastDecay: number;
   stableDecay: number;
   depotentiationRate: number;
@@ -97,7 +134,8 @@ export type ConfigCategory =
   | "signalModulation"
   | "exploration"
   | "experimentDefaults"
-  | "auditThresholds";
+  | "auditThresholds"
+  | "taggedDepotentiation";
 
 export const configFieldGroups = Object.freeze({
   structural: [
@@ -167,7 +205,16 @@ export const configFieldGroups = Object.freeze({
   ],
   exploration: ["explorationStrategy", "explorationEpsilon"],
   experimentDefaults: ["dt", "emaAlpha"],
-  auditThresholds: []
+  auditThresholds: [],
+  taggedDepotentiation: [
+    "taggedDepotentiationMode",
+    "tagTransferRate",
+    "tagDecay",
+    "taggedCaptureGain",
+    "globalSensitizationThreshold",
+    "globalAversiveLoadDecay",
+    "globalAversiveLoadIncrement"
+  ]
 }) satisfies Readonly<Record<ConfigCategory, readonly (keyof ModelConfig)[]>>;
 
 export const defaultConfig: ModelConfig = Object.freeze({
@@ -213,6 +260,13 @@ export const defaultConfig: ModelConfig = Object.freeze({
   stableDecay: 0.99999,
   depotentiationRate: 0.02,
   aversiveDepotentiationRate: 0,
+  taggedDepotentiationMode: "off",
+  tagTransferRate: 1.0,
+  tagDecay: 0.5,
+  taggedCaptureGain: 1.0,
+  globalSensitizationThreshold: 0.5,
+  globalAversiveLoadDecay: 0.9,
+  globalAversiveLoadIncrement: 1.0,
   negativeThreshold: -0.15,
   aversiveBadOutcomeThreshold: 0,
 

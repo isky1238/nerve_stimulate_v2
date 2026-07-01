@@ -55,6 +55,21 @@ export interface Neuron {
   targetSpikeRate: number;
   dormantTime: number;
   overactiveTime: number;
+
+  /**
+   * Carried tag load from a tagged impulse (toxin sensory origin). Rides the
+   * active conduction path: set on toxin sensory firing, propagated forward
+   * to a postsynaptic neuron when that neuron fires after receiving tagged
+   * input. Decays per tick when not re-driven. Read at capture time to decide
+   * whether to flip accumulation direction on this neuron's readout synapses.
+   */
+  tagLoad: number;
+  /**
+   * Per-tick accumulator of incoming tag from active presynaptic partners.
+   * Reset at the start of each propagation tick (resetBranchInputs); folded
+   * into tagLoad during integrateNeuron if this neuron fires.
+   */
+  tagInputAccum: number;
 }
 
 export interface CreateNeuronParams {
@@ -132,7 +147,9 @@ export function createNeuron(params: CreateNeuronParams, config: ModelConfig): N
     recentSpikeRate: 0,
     targetSpikeRate: config.targetSpikeRate,
     dormantTime: 0,
-    overactiveTime: 0
+    overactiveTime: 0,
+    tagLoad: 0,
+    tagInputAccum: 0
   };
 }
 
@@ -150,6 +167,10 @@ export function resetBranchInputs(neurons: Neuron[]): void {
       branch.active = false;
       branch.plasticityGate = 1;
     }
+    // Per-tick incoming tag accumulator is cleared before each propagation
+    // pass; tagLoad (the carried-forward tag) is NOT cleared here — it decays
+    // in integrateNeuron.
+    neuron.tagInputAccum = 0;
   }
 }
 
@@ -170,6 +191,11 @@ export function resetNeuronRuntime(neuron: Neuron, clearActivity = false): void 
   neuron.refractory = 0;
   neuron.outputSignal = 0;
   neuron.spike = false;
+  // Tag is per-trial transient runtime state; cleared on network reset so a
+  // prior trial's tag does not leak into the next. The toxin sensory origin
+  // re-sets tagLoad fresh each trial after reset.
+  neuron.tagLoad = 0;
+  neuron.tagInputAccum = 0;
 
   for (const branch of neuron.branches) {
     branch.inputSum = 0;
@@ -238,6 +264,18 @@ export function integrateNeuron(neuron: Neuron, config: ModelConfig): void {
   neuron.recentSpikeRate = ema(neuron.recentSpikeRate, neuron.spike ? 1 : 0, config.emaAlpha);
   neuron.dormantTime = neuron.spike ? 0 : neuron.dormantTime + 1;
   neuron.overactiveTime = neuron.recentSpikeRate > neuron.targetSpikeRate * 2 ? neuron.overactiveTime + 1 : 0;
+
+  // Tag propagation: a tagged impulse rides the active path. If this neuron
+  // fired AND received tagged input this tick, it carries the tag forward
+  // (so the next layer's synapses can be marked). If it did not fire, its
+  // carried tag decays. A firing neuron with no tagged input also decays its
+  // carried tag (tag does not spontaneously arise — only toxin sensory
+  // origin sets it, and only active propagation carries it forward).
+  if (neuron.spike && neuron.tagInputAccum > 0) {
+    neuron.tagLoad = Math.max(neuron.tagLoad * config.tagDecay, neuron.tagInputAccum);
+  } else {
+    neuron.tagLoad *= config.tagDecay;
+  }
 
   const thresholdDelta = (neuron.recentSpikeRate - neuron.targetSpikeRate) * config.thresholdAdaptRate;
   neuron.dynamicThreshold = Math.min(

@@ -894,3 +894,62 @@ test("valence probe stem variant forms candidate readouts (developmental wiring 
   );
   assert.equal(hasReadout, true);
 });
+
+test("tagged impulse propagates along toxin sensory path to motor-side readout", () => {
+  // Step 1 infrastructure: a toxin sensory neuron emits a tagged impulse; the
+  // tag rides the active conduction path (sensory -> inter -> motor) without
+  // altering forward drive, marking synapses it traverses.
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, toxinImpulseIds, centerIds } = ctx;
+  const roles = new Map(network.neurons.map((nr) => [nr.id, nr.role]));
+
+  resetNetworkRuntime(network);
+  setSensoryOutputs(network, centerIds);
+  // Toxin sensory origin: mark the toxin-impulse sensory neurons' carried tag.
+  for (const nr of network.neurons) {
+    if (nr.role === "sensory" && toxinImpulseIds.includes(nr.id)) {
+      nr.tagLoad = 1;
+    }
+  }
+  propagateAndIntegrateRole(network, "interneuron", config);
+  clearSensoryOutputs(network);
+  propagateAndIntegrateRole(network, "motor", config);
+
+  // (a) Tag marked the toxin sensory -> inter stems it traversed.
+  const stemTagged = network.synapses.some(
+    (s) => roles.get(s.preNeuronId) === "sensory" && toxinImpulseIds.includes(s.preNeuronId) && s.tagLoad > 0
+  );
+  assert.ok(stemTagged, "tag should mark toxin sensory->inter stems");
+
+  // (b) Tag rode active inter firing forward to the inter -> motor readout.
+  const readoutTagged = network.synapses.some(
+    (s) =>
+      roles.get(s.preNeuronId) === "interneuron" &&
+      roles.get(s.postNeuronId) === "motor" &&
+      s.tagLoad > 0
+  );
+  assert.ok(readoutTagged, "tag should reach inter->motor readout via active path");
+
+  // (c) Tag does NOT spontaneously arise on nutrient sensory stems (no origin).
+  const nutrientStemTagged = network.synapses.some(
+    (s) => roles.get(s.preNeuronId) === "sensory" && !toxinImpulseIds.includes(s.preNeuronId) && s.tagLoad > 0
+  );
+  assert.equal(nutrientStemTagged, false);
+});
+
+test("no tag propagates when toxin sensory carries no tag origin", () => {
+  const config = createValenceTestConfig();
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds } = ctx;
+
+  resetNetworkRuntime(network);
+  setSensoryOutputs(network, centerIds);
+  // No sensory tagLoad set anywhere — tag has no origin.
+  propagateAndIntegrateRole(network, "interneuron", config);
+  clearSensoryOutputs(network);
+  propagateAndIntegrateRole(network, "motor", config);
+
+  const anyTagged = network.synapses.some((s) => s.tagLoad > 0);
+  assert.equal(anyTagged, false);
+});

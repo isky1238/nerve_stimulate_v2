@@ -43,6 +43,13 @@ export interface Synapse {
    * decay is skipped. Learned/plastic synapses stay false.
    */
   decayProtected: boolean;
+  /**
+   * Tag load reaching this synapse from a tagged impulse along the active
+   * path. Set during propagateSynapses when the presynaptic partner carries
+   * tagLoad and fires. Read at capture time to decide whether to flip the
+   * accumulation direction (de-consolidation). Cleared on network reset.
+   */
+  tagLoad: number;
 }
 
 export interface CreateSynapseParams {
@@ -86,7 +93,8 @@ export function createSynapse(params: CreateSynapseParams, config: ModelConfig):
     reconnectCooldown: 0,
     pruneMark: 0,
     stabilityScore: 0,
-    decayProtected: params.decayProtected ?? false
+    decayProtected: params.decayProtected ?? false,
+    tagLoad: 0
   };
 
   refreshSynapseWeight(synapse, config);
@@ -134,6 +142,9 @@ export function propagateSynapses(
 
     if (!isActiveSignal(pre.outputSignal)) {
       synapse.recentUse = ema(synapse.recentUse, 0, config.emaAlpha);
+      // No active impulse traverses this synapse this tick, so it carries no
+      // tag forward. Decay any residual tag (e.g. from a prior tick).
+      synapse.tagLoad = ema(synapse.tagLoad, 0, config.emaAlpha);
       continue;
     }
 
@@ -141,6 +152,20 @@ export function propagateSynapses(
     applyEffectToBranch(postBranch, effect);
     synapse.lastUsedTime = tick;
     synapse.recentUse = ema(synapse.recentUse, 1, config.emaAlpha);
+
+    // Tagged-impulse hitchhiking: if the presynaptic partner carries tagLoad,
+    // the active impulse marks this synapse and deposits tag into the post
+    // neuron's per-tick accumulator (folded into post.tagLoad at integrate
+    // time iff the post fires). This does NOT alter the forward effect — tag
+    // only travels along the active path, it does not drive activity.
+    if (pre.tagLoad > 0) {
+      const transferred = pre.tagLoad * config.tagTransferRate;
+      synapse.tagLoad = Math.max(synapse.tagLoad, transferred);
+      post.tagInputAccum += transferred;
+    } else {
+      synapse.tagLoad = ema(synapse.tagLoad, 0, config.emaAlpha);
+    }
+
     events.push({
       synapseId: synapse.id,
       preSignal: pre.outputSignal,

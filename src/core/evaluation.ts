@@ -19,6 +19,14 @@ export interface LearningNetwork {
   synapses: Synapse[];
   pairMemory: PairMemory[];
   tick: number;
+  /**
+   * Global aversive load (variant 1 / specificFactor "hormone" gate).
+   * Incremented when a toxin sensory neuron fires, decayed per tick. Read at
+   * capture time as the AND-gate for tagged-impulse depotentiation: a tag
+   * reaching a readout flips capture only while this load exceeds the
+   * sensitization threshold. Its decay-after-impulse is the hormone window.
+   */
+  globalAversiveLoad: number;
 }
 
 export interface Pattern {
