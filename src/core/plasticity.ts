@@ -4,16 +4,16 @@ import { clampMagnitude, ema, isActiveSignal } from "./signal";
 import { Synapse, isConductingSynapse, refreshSynapseWeight } from "./synapse";
 import {
   AversiveLearningTag,
-  computeAversiveStableDepotentiationDelta,
   computeRewardFastDelta,
   computeStableCaptureAmount,
   computeStableDepotentiationDelta,
   computeStdpEligibilityDelta,
   computeSupervisedFastDelta,
+  computeTaggedCaptureAmount,
+  isTaggedDepotentiationActive,
   nextActivityTrace,
   nextEligibilityTrace,
-  positiveEligibilityScale,
-  shouldApplyAversiveStableDepotentiation
+  positiveEligibilityScale
 } from "./plasticityMechanisms";
 
 export interface LearningEvent {
@@ -162,60 +162,6 @@ export function applyRewardLearning(
   return events;
 }
 
-export function applyAversiveStableDepotentiation(
-  synapses: Synapse[],
-  neuronsById: Map<string, Neuron>,
-  aversiveTag: AversiveLearningTag | undefined,
-  config: ModelConfig
-): LearningEvent[] {
-  if (!shouldApplyAversiveStableDepotentiation(aversiveTag, config)) {
-    return [];
-  }
-
-  const events: LearningEvent[] = [];
-  const intensity = aversiveTag?.intensity ?? 0;
-
-  for (const synapse of synapses) {
-    if (!isConductingSynapse(synapse) || synapse.stableWeight <= 0 || synapse.eligibilityTrace === 0) {
-      continue;
-    }
-
-    const pre = neuronsById.get(synapse.preNeuronId);
-    const post = neuronsById.get(synapse.postNeuronId);
-
-    if (!pre || !post || post.role !== "motor" || !isActiveSignal(pre.outputSignal) || !isActiveSignal(post.outputSignal)) {
-      continue;
-    }
-
-    const branch = post.branches.find((candidate) => candidate.id === synapse.postBranchId);
-    const plasticityGate = branch?.plasticityGate ?? 1;
-    const stableBefore = synapse.stableWeight;
-    const stableDelta = computeAversiveStableDepotentiationDelta(
-      synapse.eligibilityTrace,
-      plasticityGate,
-      intensity,
-      config
-    );
-
-    synapse.stableWeight = clampMagnitude(synapse.stableWeight + stableDelta, 0, config.maxWeight);
-    if (synapse.stableWeight < config.stableThreshold) {
-      synapse.state = "active";
-    }
-    refreshSynapseWeight(synapse, config);
-
-    if (synapse.stableWeight !== stableBefore) {
-      events.push({
-        synapseId: synapse.id,
-        kind: "reward",
-        deltaFast: 0,
-        deltaStable: synapse.stableWeight - stableBefore
-      });
-    }
-  }
-
-  return events;
-}
-
 export function applySupervisedMotorLearning(
   synapses: Synapse[],
   neuronsById: Map<string, Neuron>,
@@ -326,11 +272,45 @@ export function decayWeights(synapses: Synapse[], config: ModelConfig): Learning
   return events;
 }
 
-export function captureStableWeights(synapses: Synapse[], config: ModelConfig): LearningEvent[] {
+export function captureStableWeights(
+  synapses: Synapse[],
+  neuronsById: Map<string, Neuron>,
+  globalAversiveLoad: number,
+  config: ModelConfig
+): LearningEvent[] {
   const events: LearningEvent[] = [];
 
   for (const synapse of synapses) {
     if (!isConductingSynapse(synapse)) {
+      continue;
+    }
+
+    // Tagged-impulse depotentiation: when a tagged impulse has reached this
+    // readout synapse along the active path, flip the capture direction —
+    // instead of consolidating fast->stable, erode stable and reverse-migrate
+    // it to fast (de-consolidation). This replaces the old reverse-term B
+    // channel. Gate: tagLoad>0 (on path) + stable>0 + eligibilityTrace!=0
+    // (active hit this trial), restricted to motor readouts.
+    if (isTaggedDepotentiationActive(synapse, neuronsById, globalAversiveLoad, config)) {
+      if (synapse.stableWeight <= 0 || synapse.eligibilityTrace === 0) {
+        continue;
+      }
+
+      const beforeFast = synapse.fastWeight;
+      const beforeStable = synapse.stableWeight;
+      const amount = computeTaggedCaptureAmount(synapse.stableWeight, config);
+      synapse.stableWeight = clampMagnitude(synapse.stableWeight - amount, 0, config.maxWeight);
+      synapse.fastWeight = clampMagnitude(synapse.fastWeight + amount, 0, config.maxWeight);
+      if (synapse.stableWeight < config.stableThreshold) {
+        synapse.state = "active";
+      }
+      refreshSynapseWeight(synapse, config);
+      events.push({
+        synapseId: synapse.id,
+        kind: "capture",
+        deltaFast: synapse.fastWeight - beforeFast,
+        deltaStable: synapse.stableWeight - beforeStable
+      });
       continue;
     }
 

@@ -429,7 +429,7 @@ function runNetworkForSensors(
       1,
       config
     ).length;
-    captureUpdates = captureStableWeights(network.synapses, config).length;
+    captureUpdates = captureStableWeights(network.synapses, neuronsById, network.globalAversiveLoad, config).length;
     decayUpdates = decayWeights(network.synapses, config).length;
   }
 

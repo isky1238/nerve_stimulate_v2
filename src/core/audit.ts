@@ -378,7 +378,7 @@ function runAuditTrial(
       1,
       config
     ).length;
-    captureUpdates = captureStableWeights(network.synapses, config).length;
+    captureUpdates = captureStableWeights(network.synapses, neuronsById, network.globalAversiveLoad, config).length;
   }
 
   decayWeights(network.synapses, config);

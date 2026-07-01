@@ -132,6 +132,12 @@ const SWAP = process.env.SWAP === "1";
 // baseline alpha: 0 keeps nutrient at exactly 0 reward signal (no hidden credit via
 // baseline drift). Set BASELINE_ALPHA=0.1 to compare with standard advantage-baseline.
 const BASELINE_ALPHA = numberEnv("BASELINE_ALPHA", 0);
+// TAGGED_MODE selects the depotentiation mechanism:
+//   off            — no tagged-impulse flip (A silenced + B deleted => no depotentiation;
+//                    both readouts accumulate symmetrically => conflict/stuck baseline).
+//   taggedImpulse  — variant 2: tag reaching a readout flips capture (self-marking).
+//   specificFactor — variant 1: AND gate of global aversive load + tag reaching readout.
+const TAGGED_MODE = process.env.TAGGED_MODE || "taggedImpulse";
 
 function createProbeConfig() {
   return withConfig({
@@ -146,15 +152,17 @@ function createProbeConfig() {
     stableThreshold: 0.12,
     useThreshold: 0.08,
     depotentiationRate: 0.64,
-    // Asymmetric valence: toxin tagged negative reward, nutrient no reward.
-    // Keep aversiveAvoidanceBonus=0 so goodAvoidance never slips nutrient a positive
-    // bonus (would violate "nutrient = no credit"). badOutcomeDepotentiation drives
-    // stable-weight depotentiation on motor1 input when toxin is contacted.
-    aversiveTagStrategy: AVERSIVE_STRATEGY,
+    // Tagged-impulse depotentiation (replaces A & B). A is silenced (TOXIN_REWARD=0)
+    // and B is deleted; toxin depression comes from the toxin sensory tag riding the
+    // active path and flipping capture at the readout. AVERSIVE_STRATEGY is kept off
+    // (the old badOutcomeDepotentiation reverse-term channel no longer exists).
+    aversiveTagStrategy: "off",
     aversiveTagGain: 0,
     aversiveAvoidanceBonus: 0,
-    aversiveDepotentiationRate: 0.5,
+    aversiveDepotentiationRate: 0,
     aversiveBadOutcomeThreshold: 0,
+    taggedDepotentiationMode: TAGGED_MODE,
+    taggedCaptureGain: 1.0,
     rewardAdvantageBaselineAlpha: BASELINE_ALPHA
   });
 }
@@ -420,8 +428,8 @@ function printCaseReport(report) {
   const { testCase, variant } = report;
   console.log(`\n=== ${testCase.id}_${variant} ===`);
   console.log(`${testCase.description} variant=${variant} n=${testCase.n} counts=${2 * testCase.n}/${testCase.mediumCount}/2`);
-  console.log(`aversive=${AVERSIVE_STRATEGY} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP}`);
-  console.log("left=toxin contact(neg reward)  right=nutrient contact(no reward)");
+  console.log(`taggedMode=${TAGGED_MODE} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP}`);
+  console.log("left=toxin contact(tagged impulse)  right=nutrient contact(no tag)");
   console.log("epoch   left%  right%  noop%  confl%  toxinEff  nutrEff  formed activ");
   for (const row of report.rows) {
     console.log(
@@ -464,8 +472,8 @@ function printCaseReport(report) {
 function main() {
   console.log("=== asymmetric valence 1D probe ===");
   console.log(`seeds=${SEEDS.join(",")} epochs=${EPOCHS} trials/epoch=${TRIALS_PER_EPOCH} checkpoints=${[...CHECKPOINTS].sort((a, b) => a - b).join(",")}`);
-  console.log(`aversive=${AVERSIVE_STRATEGY} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP} maxNewConn=${MAX_NEW_CONN} toxinReward=${TOXIN_REWARD}`);
-  console.log(`toxin contact = ${TOXIN_REWARD} reward + badOutcome tag; nutrient contact = 0 reward (no credit channel).`);
+  console.log(`taggedMode=${TAGGED_MODE} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP} maxNewConn=${MAX_NEW_CONN} toxinReward=${TOXIN_REWARD}`);
+  console.log(`toxin contact = ${TOXIN_REWARD} reward (A silenced); toxin sensory emit tagged impulse; nutrient contact = 0 reward (no credit).`);
 
   for (const testCase of DEFAULT_CASES) {
     for (const variant of VARIANTS) {

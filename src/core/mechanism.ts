@@ -3,7 +3,6 @@ import { ActionDecision, WorldAction, targetMotorForAction } from "./arbitration
 import type { LearningNetwork } from "./evaluation";
 import { indexNeurons, integrateNeuron, NeuronRole, resetBranchInputs, resetNeuronRuntime, setSensoryOutput } from "./neuron";
 import {
-  applyAversiveStableDepotentiation,
   applyRewardLearning,
   applySupervisedMotorLearning,
   captureStableWeights,
@@ -117,8 +116,13 @@ export function applyRewardOutcomeLearning(
     modulator,
     config
   );
-  const aversiveEvents = applyAversiveStableDepotentiation(network.synapses, neuronsById, aversiveTag, config);
-  return rewardEvents.length + aversiveEvents.length;
+  // The old reverse-term B channel (applyAversiveStableDepotentiation) is
+  // removed. Aversive depotentiation now happens via tagged-impulse flip inside
+  // applyMaintenanceDecayAndCapture, driven by internally-propagated tagLoad
+  // (not the external aversiveTag). The aversiveTag param is retained for
+  // signature stability with challenge2d/complex2d callers; it still feeds the
+  // reward-signal/modulator computation above (avoidanceMarker/modulatorOnly).
+  return rewardEvents.length;
 }
 
 export function applySupervisedMotorOutcomeLearning(
@@ -148,8 +152,14 @@ export function applyMaintenanceDecayAndCapture(
   network: LearningNetwork,
   config: ModelConfig
 ): MaintenanceUpdateCounts {
+  const neuronsById = indexNeurons(network.neurons);
   return {
-    captureUpdates: captureStableWeights(network.synapses, config).length,
+    captureUpdates: captureStableWeights(
+      network.synapses,
+      neuronsById,
+      network.globalAversiveLoad,
+      config
+    ).length,
     decayUpdates: decayWeights(network.synapses, config).length
   };
 }

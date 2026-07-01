@@ -17,17 +17,17 @@ import {
 import {
   computeAversiveModulator,
   computeAversiveRewardSignal,
-  computeAversiveStableDepotentiationDelta,
   computeRewardFastDelta,
   computeRewardModulator,
   computeStableCaptureAmount,
   computeStableDepotentiationDelta,
   computeStdpEligibilityDelta,
   computeSupervisedFastDelta,
+  computeTaggedCaptureAmount,
+  isTaggedDepotentiationActive,
   nextActivityTrace,
   nextEligibilityTrace,
-  positiveEligibilityScale,
-  shouldApplyAversiveStableDepotentiation
+  positiveEligibilityScale
 } from "../src/core/plasticityMechanisms";
 import { explainTrace, runLearningTrace } from "../src/core/trace";
 import { createChallengePretrainExports } from "../src/export/challengePretrainExport";
@@ -205,7 +205,7 @@ test("plasticity mechanism calculations stay separated from update flow", () => 
   assertClose(computeStableCaptureAmount(0.5, defaultConfig), 0.01);
 
   const goodTag = { present: true, badOutcome: false, goodAvoidance: true, intensity: 1 };
-  const badTag = { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 };
+  void goodTag;
   const markerConfig = withConfig({
     aversiveTagStrategy: "avoidanceMarker",
     aversiveAvoidanceBonus: 0.6
@@ -214,17 +214,30 @@ test("plasticity mechanism calculations stay separated from update flow", () => 
     aversiveTagStrategy: "modulatorOnly",
     aversiveTagGain: 0.5
   });
-  const depotConfig = withConfig({
-    aversiveTagStrategy: "badOutcomeDepotentiation",
-    aversiveDepotentiationRate: 0.04
-  });
 
   assertClose(computeAversiveRewardSignal(0.2, goodTag, markerConfig), 0.8);
   assertClose(computeAversiveRewardSignal(0.2, goodTag, defaultConfig), 0.2);
   assert.ok(computeAversiveModulator(0.1, goodTag, modulatorConfig) > 0.1);
-  assert.equal(shouldApplyAversiveStableDepotentiation(badTag, depotConfig), true);
-  assert.equal(shouldApplyAversiveStableDepotentiation(goodTag, depotConfig), false);
-  assertClose(computeAversiveStableDepotentiationDelta(-0.5, 1, 1, depotConfig), -0.02);
+
+  // Tagged-impulse flip helpers (replace the deleted reverse-term B channel).
+  // isTaggedDepotentiationActive gates on mode + synapse.tagLoad + motor post;
+  // variant 1 (specificFactor) additionally ANDs the global aversive load.
+  const taggedCfg = withConfig({ taggedDepotentiationMode: "taggedImpulse" });
+  const specificCfg = withConfig({ taggedDepotentiationMode: "specificFactor" });
+  const motor = { id: "m", role: "motor" } as unknown as import("../src/core/neuron").Neuron;
+  const inter = { id: "i", role: "interneuron" } as unknown as import("../src/core/neuron").Neuron;
+  const neuronsById = new Map<string, import("../src/core/neuron").Neuron>([["m", motor], ["i", inter]]);
+  const taggedMotorSyn = { tagLoad: 0.5, decayProtected: false, postNeuronId: "m" } as import("../src/core/synapse").Synapse;
+  const taggedInterSyn = { tagLoad: 0.5, decayProtected: false, postNeuronId: "i" } as import("../src/core/synapse").Synapse;
+  const untaggedSyn = { tagLoad: 0, decayProtected: false, postNeuronId: "m" } as import("../src/core/synapse").Synapse;
+  assert.equal(isTaggedDepotentiationActive(taggedMotorSyn, neuronsById, 0, taggedCfg), true);
+  assert.equal(isTaggedDepotentiationActive(taggedInterSyn, neuronsById, 0, taggedCfg), false, "non-motor post must not flip");
+  assert.equal(isTaggedDepotentiationActive(untaggedSyn, neuronsById, 0, taggedCfg), false, "no tag must not flip");
+  // specificFactor AND-gate: tag present but global load below threshold -> no flip.
+  assert.equal(isTaggedDepotentiationActive(taggedMotorSyn, neuronsById, 0, specificCfg), false);
+  assert.equal(isTaggedDepotentiationActive(taggedMotorSyn, neuronsById, 1, specificCfg), true);
+  // Flip amount scales with stableWeight (not fastWeight) × captureRate × gain.
+  assertClose(computeTaggedCaptureAmount(0.5, withConfig({ stableCaptureRate: 0.02, taggedCaptureGain: 1 })), 0.01);
 });
 
 test("learning trace records propagation, gate snapshots, and supervised weight changes", () => {
@@ -673,11 +686,17 @@ function createValenceTestConfig() {
     stableThreshold: 0.12,
     useThreshold: 0.08,
     depotentiationRate: 0.64,
-    aversiveTagStrategy: "badOutcomeDepotentiation",
+    // New tagged-impulse depotentiation (variant 2). The old A channel
+    // (reward=-1) and B channel (aversiveTag badOutcomeDepotentiation) are
+    // both off: toxin depression comes from the tag riding the toxin sensory
+    // path and flipping capture at the readout, not from a negative reward.
+    aversiveTagStrategy: "off",
     aversiveTagGain: 0,
     aversiveAvoidanceBonus: 0,
-    aversiveDepotentiationRate: 0.5,
+    aversiveDepotentiationRate: 0,
     aversiveBadOutcomeThreshold: 0,
+    taggedDepotentiationMode: "taggedImpulse",
+    taggedCaptureGain: 1.0,
     rewardAdvantageBaselineAlpha: 0
   });
 }
@@ -697,6 +716,17 @@ function buildValenceNetwork(variant: "prewired" | "stem", config: ReturnType<ty
   const nutrientImpulseIds = Array.from({ length: n }, (_, i) => `input${n + i}`);
   const centerIds = new Set([...toxinImpulseIds, ...nutrientImpulseIds]);
   return { network, n, toxinImpulseIds, nutrientImpulseIds, centerIds, leftMotorId: "output0", rightMotorId: "output1" };
+}
+
+// Tag origin: toxin sensory neurons emit a tagged impulse when they fire. The
+// test (like the probe) defines which sensors are toxin — a sensory transduction
+// fact, not a plasticity judgment. The tag then propagates internally.
+function markToxinTag(network: { neurons: Array<{ id: string; role: string; tagLoad: number }> }, toxinImpulseIds: string[]): void {
+  for (const neuron of network.neurons) {
+    if (neuron.role === "sensory" && toxinImpulseIds.includes(neuron.id)) {
+      neuron.tagLoad = 1;
+    }
+  }
 }
 
 function motorReadoutEff(network: { neurons: Array<{ id: string; role: string }>; synapses: Array<{ preNeuronId: string; postNeuronId: string; effectiveWeight: number; state: string }> }, motorId: string): number {
@@ -730,18 +760,20 @@ test("valence probe maps motors to contacts: output0=left=toxin, output1=right=n
   // output0 (toxin) readout, not output1.
   const config = createValenceTestConfig();
   const ctx = buildValenceNetwork("prewired", config);
-  const { network, centerIds, leftMotorId, rightMotorId } = ctx;
+  const { network, centerIds, leftMotorId, rightMotorId, toxinImpulseIds } = ctx;
 
   const beforeLeft = motorReadoutEff(network, leftMotorId);
   const beforeRight = motorReadoutEff(network, rightMotorId);
 
-  // Run several trials where we force the LEFT (toxin) motor: negative reward
-  // + badOutcome tag should depress the left/toxin readout, leave right alone.
+  // Run several trials where we force the LEFT (toxin) motor: the toxin sensory
+  // tag rides the path and flips capture at the toxin (left) readout, eroding
+  // its stable weight; the nutrient (right) readout has no tag and is left alone.
   const baseline = { baseline: 0 };
   const rng = new SeededRandom(11);
   for (let i = 0; i < 40; i += 1) {
     resetNetworkRuntime(network);
     setSensoryOutputs(network, centerIds);
+    markToxinTag(network, toxinImpulseIds);
     propagateAndIntegrateRole(network, "interneuron", config);
     clearSensoryOutputs(network);
     propagateAndIntegrateRole(network, "motor", config);
@@ -753,8 +785,10 @@ test("valence probe maps motors to contacts: output0=left=toxin, output1=right=n
       }
     }
     updateNetworkEligibility(network, config);
-    applyRewardOutcomeLearning(network, -1, config, { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 });
-    baseline.baseline = baseline.baseline * (1 - config.rewardAdvantageBaselineAlpha) + (-1) * config.rewardAdvantageBaselineAlpha;
+    // reward=0 (A channel silenced); depression comes from the tag flip in
+    // maintenance, not from a negative reward.
+    applyRewardOutcomeLearning(network, 0, config, undefined);
+    baseline.baseline = baseline.baseline * (1 - config.rewardAdvantageBaselineAlpha) + 0 * config.rewardAdvantageBaselineAlpha;
     applyMaintenanceDecayAndCapture(network, config);
   }
 
@@ -771,17 +805,20 @@ test("valence probe maps motors to contacts: output0=left=toxin, output1=right=n
 test("valence probe nutrient contact yields zero reward signal (no credit channel)", () => {
   const config = createValenceTestConfig();
   const ctx = buildValenceNetwork("prewired", config);
-  const { network, centerIds, rightMotorId, leftMotorId } = ctx;
+  const { network, centerIds, rightMotorId, leftMotorId, toxinImpulseIds } = ctx;
 
   const beforeRight = motorReadoutEff(network, rightMotorId);
 
   // Force the RIGHT (nutrient) motor repeatedly: nutrient contact = reward 0,
-  // no aversive tag. With baseline alpha 0, rewardAdvantage = 0 -> rewardSignal
-  // = 0 -> modulator = 0 -> no LTP/LTD. Only maintenance decay acts (uniform).
+  // and the nutrient readout carries no tag (tag originates only on toxin
+  // sensory). So the nutrient readout gets no LTP and no flip — only uniform
+  // maintenance decay acts. The toxin tag is still set (toxin sensory fire at
+  // center) but the toxin readout is not driven this trial, so it does not flip.
   const rng = new SeededRandom(13);
   for (let i = 0; i < 40; i += 1) {
     resetNetworkRuntime(network);
     setSensoryOutputs(network, centerIds);
+    markToxinTag(network, toxinImpulseIds);
     propagateAndIntegrateRole(network, "interneuron", config);
     clearSensoryOutputs(network);
     propagateAndIntegrateRole(network, "motor", config);
@@ -810,16 +847,19 @@ test("valence probe nutrient contact yields zero reward signal (no credit channe
 test("valence probe prewired develops avoidance-driven nutrient approach", () => {
   const config = createValenceTestConfig();
   const ctx = buildValenceNetwork("prewired", config);
-  const { network, centerIds, leftMotorId, rightMotorId } = ctx;
+  const { network, centerIds, leftMotorId, rightMotorId, toxinImpulseIds } = ctx;
   const rng = new SeededRandom(21);
   const baseline = { baseline: 0 };
 
-  // Train: each trial, sense center, read motor, force-explore on noop/conflict,
-  // apply asymmetric reward (toxin=-1+tag, nutrient=0).
+  // Train: each trial, sense center, read motor, force-explore on noop/conflict.
+  // Toxin sensory emit a tagged impulse; the tag rides the path and flips capture
+  // at the toxin (left) readout on toxin-contact trials, eroding it. Nutrient
+  // contact carries no tag and reward=0, so the nutrient readout survives.
   for (let epoch = 0; epoch < 200; epoch += 1) {
     for (let t = 0; t < 20; t += 1) {
       resetNetworkRuntime(network);
       setSensoryOutputs(network, centerIds);
+      markToxinTag(network, toxinImpulseIds);
       propagateAndIntegrateRole(network, "interneuron", config);
       clearSensoryOutputs(network);
       propagateAndIntegrateRole(network, "motor", config);
@@ -853,11 +893,9 @@ test("valence probe prewired develops avoidance-driven nutrient approach", () =>
         contact = forced === leftMotorId ? "toxin" : "nutrient";
       }
       updateNetworkEligibility(network, config);
-      if (contact === "toxin") {
-        applyRewardOutcomeLearning(network, -1, config, { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 });
-      } else {
-        applyRewardOutcomeLearning(network, 0, config, undefined);
-      }
+      // reward=0 either way (A channel silenced); depression is tag-driven.
+      void contact;
+      applyRewardOutcomeLearning(network, 0, config, undefined);
       baseline.baseline = 0;
       applyMaintenanceDecayAndCapture(network, config);
     }
@@ -866,6 +904,7 @@ test("valence probe prewired develops avoidance-driven nutrient approach", () =>
   // Frozen eval: native choice with no exploration.
   resetNetworkRuntime(network);
   setSensoryOutputs(network, centerIds);
+  markToxinTag(network, toxinImpulseIds);
   propagateAndIntegrateRole(network, "interneuron", config);
   clearSensoryOutputs(network);
   propagateAndIntegrateRole(network, "motor", config);

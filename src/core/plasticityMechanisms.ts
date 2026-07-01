@@ -1,4 +1,6 @@
 import { ModelConfig } from "../config/newModelConfig";
+import { Neuron } from "./neuron";
+import { Synapse } from "./synapse";
 
 export interface AversiveLearningTag {
   present: boolean;
@@ -95,17 +97,54 @@ export function computeAversiveModulator(
   return Math.min(1, baseModulator + Math.tanh(aversiveTag.intensity * config.aversiveTagGain));
 }
 
-export function shouldApplyAversiveStableDepotentiation(
-  aversiveTag: AversiveLearningTag | undefined,
+/**
+ * Whether a synapse should undergo tagged-impulse depotentiation (the
+ * flip-accumulation-direction mechanism that replaces the old reverse-term
+ * B channel). Conditions:
+ *  - mode != "off"
+ *  - synapse is on the tagged active path (synapse.tagLoad > 0)
+ *  - post is a motor neuron (readout only — protects sensory->inter stems;
+ *    decayProtected stems are also excluded as belt-and-suspenders)
+ *  - variant 1 (specificFactor): AND the global aversive load exceeds the
+ *    sensitization threshold (the specific-factor hormone gate)
+ *
+ * Pure compute; the actual stable erode + fast reverse-migration is committed
+ * in captureStableWeights using computeTaggedCaptureAmount.
+ */
+export function isTaggedDepotentiationActive(
+  synapse: Synapse,
+  neuronsById: Map<string, Neuron>,
+  globalAversiveLoad: number,
   config: ModelConfig
 ): boolean {
-  return Boolean(
-    aversiveTag?.present &&
-    aversiveTag.badOutcome &&
-    config.aversiveDepotentiationRate > 0 &&
-    (config.aversiveTagStrategy === "badOutcomeDepotentiation" ||
-      config.aversiveTagStrategy === "combined")
-  );
+  if (config.taggedDepotentiationMode === "off") {
+    return false;
+  }
+  if (synapse.tagLoad <= 0) {
+    return false;
+  }
+  if (synapse.decayProtected) {
+    return false;
+  }
+  const post = neuronsById.get(synapse.postNeuronId);
+  if (!post || post.role !== "motor") {
+    return false;
+  }
+  if (config.taggedDepotentiationMode === "specificFactor") {
+    return globalAversiveLoad > config.globalSensitizationThreshold;
+  }
+  // taggedImpulse: tag reaching the readout alone flips capture.
+  return true;
+}
+
+/**
+ * Amount of stable weight to erode (and reverse-migrate to fast) when a
+ * tagged impulse flips the capture direction. Based on stableWeight (the
+ * consolidation being de-consolidated), unlike normal capture which is based
+ * on fastWeight. Gain scales the rate relative to stableCaptureRate.
+ */
+export function computeTaggedCaptureAmount(stableWeight: number, config: ModelConfig): number {
+  return stableWeight * config.stableCaptureRate * config.taggedCaptureGain;
 }
 
 export function computeRewardFastDelta(
@@ -136,15 +175,6 @@ export function computeStableDepotentiationDelta(
   config: ModelConfig
 ): number {
   return -config.depotentiationRate * Math.abs(eligibilityTrace) * plasticityGate * modulator;
-}
-
-export function computeAversiveStableDepotentiationDelta(
-  eligibilityTrace: number,
-  plasticityGate: number,
-  aversiveIntensity: number,
-  config: ModelConfig
-): number {
-  return -config.aversiveDepotentiationRate * Math.abs(eligibilityTrace) * plasticityGate * aversiveIntensity;
 }
 
 export function computeStableCaptureAmount(fastWeight: number, config: ModelConfig): number {

@@ -486,7 +486,7 @@ function runMappingTrial(
 
   if (learningOn) {
     applySupervisedMotorLearning(network.synapses, neuronsById, pattern.targetMotorId, activeMotorSet, 1, config);
-    captureStableWeights(network.synapses, config);
+    captureStableWeights(network.synapses, neuronsById, network.globalAversiveLoad, config);
   }
 
   decayWeights(network.synapses, config);

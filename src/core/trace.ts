@@ -302,7 +302,7 @@ function runTraceTrial(
     );
     weightEvents.push(
       ...recordWeightEvents(network, neuronsById, pattern.targetMotorId, activeMotors, () =>
-        captureStableWeights(network.synapses, config)
+        captureStableWeights(network.synapses, neuronsById, network.globalAversiveLoad, config)
       )
     );
   }
