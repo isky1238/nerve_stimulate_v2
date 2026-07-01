@@ -90,6 +90,15 @@ function numberEnv(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+// Like numberEnv but allows any finite value (including negative and zero),
+// for params like TOXIN_REWARD where -1 is a legitimate signal value. Only
+// falls back when the env var is absent or non-numeric.
+function signedNumberEnv(name, fallback) {
+  if (process.env[name] === undefined || process.env[name] === "") return fallback;
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function listEnv(name, fallback) {
   if (!process.env[name]) return fallback;
   const values = process.env[name]
@@ -113,6 +122,12 @@ const MAX_NEW_CONN = numberEnv("MAX_NEW_CONN", 8);
 const VARIANT_FILTER = process.env.VARIANT ? new Set([process.env.VARIANT]) : new Set(VARIANTS);
 const CASE_FILTER = listEnv("CASES", null);
 const AVERSIVE_STRATEGY = process.env.AVERSIVE_STRATEGY || "badOutcomeDepotentiation";
+// TOXIN_REWARD isolates the value channel (A) from the tag channel (B). The 2×2
+// experiment proved A is a complete no-op in this config (reward=-1 vs reward=0
+// are bit-identical whether tag is on or off). Default 0 — the negative-value
+// channel is removed by default per user direction. Set -1 to reproduce the old
+// signed-rewardSignal path (kept only as a reproducibility对照).
+const TOXIN_REWARD = signedNumberEnv("TOXIN_REWARD", 0);
 const SWAP = process.env.SWAP === "1";
 // baseline alpha: 0 keeps nutrient at exactly 0 reward signal (no hidden credit via
 // baseline drift). Set BASELINE_ALPHA=0.1 to compare with standard advantage-baseline.
@@ -224,7 +239,7 @@ function runTrial(network, ctx, config, rng, baselineState, explore) {
   let reward;
   let aversiveTag;
   if (choice.contact === "toxin") {
-    reward = -1;
+    reward = TOXIN_REWARD;
     aversiveTag = { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 };
   } else if (choice.contact === "nutrient") {
     reward = 0;
@@ -434,8 +449,8 @@ function printCaseReport(report) {
 function main() {
   console.log("=== asymmetric valence 1D probe ===");
   console.log(`seeds=${SEEDS.join(",")} epochs=${EPOCHS} trials/epoch=${TRIALS_PER_EPOCH} checkpoints=${[...CHECKPOINTS].sort((a, b) => a - b).join(",")}`);
-  console.log(`aversive=${AVERSIVE_STRATEGY} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP} maxNewConn=${MAX_NEW_CONN}`);
-  console.log("toxin contact = -1 reward + badOutcome tag; nutrient contact = 0 reward (no credit channel).");
+  console.log(`aversive=${AVERSIVE_STRATEGY} baselineAlpha=${BASELINE_ALPHA} swap=${SWAP} maxNewConn=${MAX_NEW_CONN} toxinReward=${TOXIN_REWARD}`);
+  console.log(`toxin contact = ${TOXIN_REWARD} reward + badOutcome tag; nutrient contact = 0 reward (no credit channel).`);
 
   for (const testCase of DEFAULT_CASES) {
     for (const variant of VARIANTS) {
