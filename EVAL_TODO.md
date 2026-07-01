@@ -427,6 +427,37 @@ Scope: `/root/research/nerve_stimulate_v2`
 2. `fanout n>=2` 不是自动更好;如果 medium 同时连到所有 output,且没有局部竞争/抑制/选择性去固化,就会出现 correct 和 wrong output 同时过阈。
 3. `2/5/2` 的 noop 表明"少 medium + 最近连接 + 固定阈值"会让某些 input 覆盖不足;这更接近用户担心的单节点输入/输出固定问题,应继续作为 topology-family 指标。
 
+### E9. tagged-impulse 去固化机制 — 替换 A/B 负值通道 + graded 浓度梯度重跑(2026-07-01)
+
+**背景**:E6 的 aversive tag 有两条去固化通道:通道 A(任务层 `reward=-1` × `computeRewardFastDelta`,作用 fast,符号相关)+ 通道 B(`applyAversiveStableDepotentiation = -rate×|elig|` 反向项,作用 stable,符号无关)。用户要求消 A、用"翻转累积方向"替换 B,落地"激素/带标记冲动"两变体。
+
+**关键更正(numberEnv bug,推翻此前两轮结论)**:首轮 2×2 用 `numberEnv`(要求 `>0`)读 `TOXIN_REWARD`,`-1` 被静默拒成回退值,"reward=0"格实际全是 `-1`。修 `signedNumberEnv` 后真 2×2 证实:**A 不是 no-op,是符号病源头**(`reward=-1`+tag off → nutrEff 失控到 8.094:负 reward × 负 eligibility → spurious LTP 营养侧);`reward=0`+tag off 是对称 conflict(1.581/1.581),无 runaway → "unchecked capture 单向累积到满权"理论不成立。
+
+**新机制(已落地,4 commit c6a1302→df36f97)**:
+- tag 搭便车传播:毒物感觉神经元 `tagLoad=1` → `propagateSynapses` 标记突触+累积 post tag → `integrateNeuron` 放电时向前带,**不改前向 effect**。
+- 翻转累积方向(替换 B):tag 命中固化 readout → `captureStableWeights` 翻转 `stable -= amount; fast += amount`(回流=de-consolidation),仅 motor-post,保护 sensory 干线。
+- 两变体:`taggedImpulse`(tag 命中即翻转)、`specificFactor`(全局 aversive load ∧ tag 与门,load 有衰减=激素窗口)。
+- 消 A:探针默认 `TOXIN_REWARD=0`;删 B:`applyAversiveStableDepotentiation` 等三函数删除。
+- `npm test` 38/38 green。
+
+**二元探针 3 模式矩阵(av_4_10_2_prewired, 8seed 300ep)**:off→conflict 1.0 对称(证 A 消 B 删无残留);taggedImpulse/specificFactor→8/8 趋营养(toxinEff 0.087 ≪ nutrEff 1.282);specificFactor 门关(GLOBAL_INCREMENT=0)→conflict(证与门)。
+
+**stem/empty 单点+全量权重分析(e07c085,用户点 2/5,细化"noop"结论)**:
+- prewired off:toxin 0.320 + nutr 0.313 双侧固化 → conflict。prewired taggedImpulse:toxin 削到 0.017(flip),nutr 0.313 存活 → 8/8 趋营养。**flip 是 prewired 里削 toxin 的 active 机制**。
+- **stem off ≡ stem taggedImpulse 逐位相同**:全 readout eff=0.006 stable=0 → noop 塌缩。**flip 在 stem inert**(门要 stable>0,stem readout 从没固化 stable=0)。stem 病灶 = 既有"双侧形成 + 无正信号固化"鸡生蛋,**与 tagged 机制无关**。
+- stem epoch20 曾短暂 right=1.0(nutrEff 1.002)再塌缩——**真实瞬态正确通路**(原则 4:别把未持续住的通路当 bug)。
+- stem 双侧形成:每个 medium→output0 AND output1,tag 搭便车到两侧,但因 stable=0 flip 不触发,inert。
+
+**graded 浓度梯度重跑(060f0f4,用户点 1/1.1/1.2,自然终点测试)**:
+- 新探针 `graded_valence_probe.cjs`:多步 1D(toxin@0,nutrient@L,中心起步),浓度群体编码 k=clamp(round(n/(1+dist)),0,n) 通道发放(单模拟值<1 打不动 inter 阈值 1.0,故强度=发放通道数=招募 inter 数=motor drive 强度),只标正在发放的 toxin 通道带 tag。
+- 结果(N=5, line 0..10, 300ep×8seed):
+  - off:8/8 到 toxin(x=0,5步)。toxinEff 2.72(固化)。无 erosion → 被 toxin 吸过去。
+  - taggedImpulse:epoch20 8/8 toxin → epoch50 6/8 toxin+2/8 stuck → epoch100+ **8/8 stuck 中心**(x=5,12步 noop)。**toxinEff 削 2.72→0.51(flip 生效,避毒成功:0 toxin 接触)**。nutrEff 1.77 ≈ 5×0.35 初始(营养侧没学到东西)。
+  - specificFactor:与 taggedImpulse 相同(逼近 toxin 时 load 足够开门)。
+- **发现(回答 1.2)**:梯度下机制**不是"为防御而防御"**——真削了 toxin(2.72→0.51)、真避毒(8/8 toxin→0)。但**approach 表达不出来**:中心 x=5 处 kN=round(5/6)=1,只 1 个 nutrient inter 发放,贡献 ~0.35 ≪ motor 阈值 1.0 → 营养 motor 不发 → 卡中心。二元探针的 8/8 趋营养依赖中心全通道强驱动(k=n);梯度暴露了**单靠 avoidance 表达不出 approach**——缺(a)正营养信用(reward=0、A 消 → nutrient readout 停在初始 0.35 不长)和(b)中心感知够强。与 1.3 一致(负 tag 给避毒以意义;正向 approach 需自己的信号),也是 deferred 的 candidate/credit 鸡生蛋。
+
+**点 8(aversiveTag 死形参)核实**:`applyRewardOutcomeLearning` 的 `aversiveTag` 形参**不是死的**——`computeAversiveRewardSignal`(avoidanceMarker/combined 加 bonus)、`computeAversiveModulator`(modulatorOnly 增益)都用它,是 E6/E7 长程 8/8 的依赖。死的只是探针内部(strategy="off" 下构造的 aversiveTag 被短路),已清(e07c085)。不删核心形参。
+
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
       → 让 continued-learning sep 能取正值,而非恒 0
