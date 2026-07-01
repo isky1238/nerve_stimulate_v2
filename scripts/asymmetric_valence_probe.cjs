@@ -246,6 +246,88 @@ function markToxinTag(network, toxinImpulseIds) {
   }
 }
 
+// Full weight map + single-point stimulation trajectory dump for one trained
+// network. Answers "is stem truly noop, or did pathways form but not consolidate?"
+// (user principle #4: don't mistake an unformed pathway for a bug). Triggered by
+// ANALYZE=1; pair with SEED_LIMIT=1 + CASES + VARIANT to inspect one case.
+//
+// - WEIGHT MAP: every sensory->inter (stem) and inter->motor (readout) synapse's
+//   eff/fast/stable/elig/state/tagLoad, so we can see which pathways developed and
+//   whether tag reached the readout. Plus any non-stem/non-readout synapses (e.g.
+//   developmental tryFormConnections edges in stem variant).
+// - PATH: single-point trajectory. Activate ONLY the toxin group (with markToxinTag)
+//   and ONLY the nutrient group (no tag), propagate two ticks, record which
+//   interneurons fire, motor axonDrive vs threshold, and which inter->motor synapses
+//   carry tagLoad (tag propagation reach). No learning — pure frozen inspection.
+function analyzeNetwork(network, testCase, variant, config, ctx, seed) {
+  const roles = new Map(network.neurons.map((n) => [n.id, n.role]));
+  const motors = network.neurons.filter((n) => n.role === "motor").map((n) => n.id);
+
+  console.log(`\n>>> ANALYZE ${testCase.id}_${variant} seed=${seed} taggedMode=${TAGGED_MODE}`);
+  console.log(`>>> sensory toxin=[${ctx.toxinImpulseIds.join(",")}] nutrient=[${ctx.nutrientImpulseIds.join(",")}]`);
+  console.log(`>>> ${ctx.sem.toxinMotorId}=toxin-motor(left)  ${ctx.sem.nutrientMotorId}=nutrient-motor(right)`);
+  console.log(`>>> neurons=${network.neurons.length} synapses=${network.synapses.length}`);
+
+  console.log("\n--- WEIGHT MAP ---");
+  console.log("sensory -> inter (structural stem):");
+  for (const s of network.synapses) {
+    if (roles.get(s.preNeuronId) === "sensory" && roles.get(s.postNeuronId) === "interneuron") {
+      console.log(`  ${s.preNeuronId}->${s.postNeuronId}: eff=${fmt(s.effectiveWeight)} fast=${fmt(s.fastWeight)} stable=${fmt(s.stableWeight)} elig=${fmt(s.eligibilityTrace, 4)} state=${s.state} dp=${s.decayProtected} tag=${fmt(s.tagLoad, 3)}`);
+    }
+  }
+  console.log("inter -> motor (learned readout):");
+  for (const s of network.synapses) {
+    if (roles.get(s.preNeuronId) === "interneuron" && roles.get(s.postNeuronId) === "motor") {
+      const side = s.postNeuronId === ctx.sem.toxinMotorId ? "TOXIN" : "NUTR";
+      console.log(`  ${s.preNeuronId}->${s.postNeuronId}(${side}): eff=${fmt(s.effectiveWeight)} fast=${fmt(s.fastWeight)} stable=${fmt(s.stableWeight)} elig=${fmt(s.eligibilityTrace, 4)} state=${s.state} tag=${fmt(s.tagLoad, 3)}`);
+    }
+  }
+  const others = network.synapses.filter((s) => {
+    const pre = roles.get(s.preNeuronId);
+    const post = roles.get(s.postNeuronId);
+    return !((pre === "sensory" && post === "interneuron") || (pre === "interneuron" && post === "motor"));
+  });
+  if (others.length > 0) {
+    console.log(`other synapses (${others.length}, e.g. developmental formed):`);
+    for (const s of others) {
+      console.log(`  ${s.preNeuronId}(${roles.get(s.preNeuronId)})->${s.postNeuronId}(${roles.get(s.postNeuronId)}): eff=${fmt(s.effectiveWeight)} fast=${fmt(s.fastWeight)} stable=${fmt(s.stableWeight)} state=${s.state} dp=${s.decayProtected}`);
+    }
+  }
+
+  for (const [label, activeIds, markTag] of [
+    ["TOXIN-only", new Set(ctx.toxinImpulseIds), true],
+    ["NUTR-only", new Set(ctx.nutrientImpulseIds), false]
+  ]) {
+    const net = structuredClone(network);
+    resetNetworkRuntime(net);
+    // resetNetworkRuntime clears neuron tagLoad but NOT synapse.tagLoad (it persists
+    // across training trials by design). Zero it here so the path measurement shows
+    // ONLY tag freshly propagated from this stimulation, not residual training tag.
+    for (const s of net.synapses) s.tagLoad = 0;
+    setSensoryOutputs(net, activeIds);
+    if (markTag) markToxinTag(net, ctx.toxinImpulseIds);
+    if (config.taggedDepotentiationMode === "specificFactor") {
+      net.globalAversiveLoad += config.globalAversiveLoadIncrement;
+    }
+    propagateAndIntegrateRole(net, "interneuron", config);
+    const firingInters = net.neurons.filter((n) => n.role === "interneuron" && n.spike).map((n) => n.id);
+    clearSensoryOutputs(net);
+    propagateAndIntegrateRole(net, "motor", config);
+    const motorLine = motors.map((m) => {
+      const n = net.neurons.find((x) => x.id === m);
+      return `${m}=${fmt(n.axonDrive)}${n.spike ? "(FIRE)" : ""}`;
+    }).join("  ");
+    const taggedSyn = net.synapses
+      .filter((s) => roles.get(s.preNeuronId) === "interneuron" && roles.get(s.postNeuronId) === "motor" && s.tagLoad > 0)
+      .map((s) => `${s.preNeuronId}->${s.postNeuronId}(${fmt(s.tagLoad, 3)})`);
+    console.log(`\n--- PATH ${label} ---`);
+    console.log(`  active=[${[...activeIds].join(",")}] markTag=${markTag}`);
+    console.log(`  firing inters=[${firingInters.join(",") || "none"}]`);
+    console.log(`  motor drive: ${motorLine}  (threshold 1.0)`);
+    console.log(`  tagged inter->motor: ${taggedSyn.length ? taggedSyn.join(", ") : "none"}`);
+  }
+}
+
 // One training trial. explore=true allows force-exploration on noop/conflict.
 function runTrial(network, ctx, config, rng, baselineState, explore) {
   resetNetworkRuntime(network);
@@ -273,24 +355,24 @@ function runTrial(network, ctx, config, rng, baselineState, explore) {
 
   updateNetworkEligibility(network, config);
 
-  // Reward: toxin contact = -1 (tagged negative), nutrient contact = 0 (no reward).
+  // Reward: toxin contact = TOXIN_REWARD (default 0 = A channel silenced), nutrient
+  // contact = 0 (no credit). No aversiveTag is passed: aversiveTagStrategy is "off",
+  // so computeAversiveRewardSignal/Modulator short-circuit and any tag would be inert.
+  // Toxin depression is driven entirely by the internally-propagated tagLoad flip in
+  // applyMaintenanceDecayAndCapture, not by an external aversiveTag here.
   let reward;
-  let aversiveTag;
   if (choice.contact === "toxin") {
     reward = TOXIN_REWARD;
-    aversiveTag = { present: true, badOutcome: true, goodAvoidance: false, intensity: 1 };
   } else if (choice.contact === "nutrient") {
     reward = 0;
-    aversiveTag = undefined;
   } else {
     // conflict unresolved (eval mode with no explore) — no contact, no reward.
     reward = 0;
-    aversiveTag = undefined;
   }
 
   const rewardAdvantage = reward - baselineState.baseline;
   if (explore) {
-    applyRewardOutcomeLearning(network, rewardAdvantage, config, aversiveTag);
+    applyRewardOutcomeLearning(network, rewardAdvantage, config);
     baselineState.baseline =
       baselineState.baseline * (1 - config.rewardAdvantageBaselineAlpha) +
       reward * config.rewardAdvantageBaselineAlpha;
@@ -379,6 +461,10 @@ function runCaseSeed(testCase, variant, seed) {
         dev
       });
     }
+  }
+
+  if (process.env.ANALYZE === "1") {
+    analyzeNetwork(network, testCase, variant, config, ctx, seed);
   }
 
   return {
