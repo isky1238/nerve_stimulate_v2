@@ -6,6 +6,7 @@ import { formatAuditReport, runPre2DAudit } from "../src/core/audit";
 import { runAllEvaluations, runLearningDemo } from "../src/core/evaluation";
 import {
   createNearestLayeredTopologyBlueprint,
+  createUniformNaturalLayeredTopologyBlueprint,
   reduceLayerCounts,
   sameLayerRatio
 } from "../src/core/layeredTopologyBlueprint";
@@ -39,7 +40,7 @@ import { formatArbitrationAuditReport, runArbitrationAudit } from "../src/world/
 import { formatArbitrationMatrixReport, runArbitrationMatrixAudit } from "../src/world/auditArbitrationMatrix";
 import { formatTransferAuditReport, runTransferAudit } from "../src/world/transferAudit";
 import { formatTransferMatrixReport, runTransferAuditMatrix } from "../src/world/transferMatrix";
-import { tryFormConnections, updateConnectionStates } from "../src/core/development";
+import { tryFormConnections, tryFormNearestLayeredConnections, updateConnectionStates } from "../src/core/development";
 import { SeededRandom } from "../src/core/random";
 import {
   activeMotorIds,
@@ -605,6 +606,39 @@ test("layered topology readoutMode=empty places neurons only and reserves growth
   assert.equal(topology.motorNodes.every((n) => (n.maxInputSlots ?? 0) >= 5), true);
 });
 
+test("uniform natural n/n/n/k topology starts empty with fixed slot budgets", () => {
+  const topology = createUniformNaturalLayeredTopologyBlueprint({
+    layerSize: 4,
+    slotsPerNeuron: 3
+  });
+  const allNodes = [...topology.sensoryNodes, ...topology.interneuronNodes, ...topology.motorNodes];
+
+  assert.equal(topology.sensoryNodes.length, 4);
+  assert.equal(topology.interneuronNodes.length, 4);
+  assert.equal(topology.motorNodes.length, 4);
+  assert.equal(topology.synapses.length, 0);
+  assert.equal(allNodes.every((node) => node.maxInputSlots === 3 && node.maxOutputSlots === 3), true);
+  assert.deepEqual(topology.sensoryNodes.map((node) => node.position.x), [0, 0, 0, 0]);
+  assert.deepEqual(topology.interneuronNodes.map((node) => node.position.x), [1, 1, 1, 1]);
+  assert.deepEqual(topology.motorNodes.map((node) => node.position.x), [2, 2, 2, 2]);
+});
+
+test("uniform natural m/n/o/k topology supports unequal layer counts", () => {
+  const topology = createUniformNaturalLayeredTopologyBlueprint({
+    inputCount: 2,
+    mediumCount: 10,
+    outputCount: 5,
+    slotsPerNeuron: 5
+  });
+  const allNodes = [...topology.sensoryNodes, ...topology.interneuronNodes, ...topology.motorNodes];
+
+  assert.equal(topology.sensoryNodes.length, 2);
+  assert.equal(topology.interneuronNodes.length, 10);
+  assert.equal(topology.motorNodes.length, 5);
+  assert.equal(topology.synapses.length, 0);
+  assert.equal(allNodes.every((node) => node.maxInputSlots === 5 && node.maxOutputSlots === 5), true);
+});
+
 test("developmental step forms readout connections from a stem-only network", () => {
   const topology = createNearestLayeredTopologyBlueprint({
     inputCount: 1,
@@ -636,6 +670,51 @@ test("developmental step forms readout connections from a stem-only network", ()
   assert.equal(hasReadout, true);
 });
 
+test("nearest layered formation grows only adjacent-layer connections within uniform slots", () => {
+  const topology = createUniformNaturalLayeredTopologyBlueprint({
+    layerSize: 3,
+    slotsPerNeuron: 2
+  });
+  const network = createLearningNetworkFromBlueprint(topology, defaultConfig);
+  const metrics = tryFormNearestLayeredConnections(
+    network.neurons,
+    network.synapses,
+    network.pairMemory,
+    network.tick,
+    defaultConfig,
+    12
+  );
+  const roles = new Map(network.neurons.map((neuron) => [neuron.id, neuron.role]));
+
+  assert.ok(metrics.formed > 0);
+  assert.ok(metrics.formed <= 12);
+  assert.equal(network.synapses.length, metrics.formed);
+  assert.equal(
+    network.synapses.every((synapse) => {
+      const pre = roles.get(synapse.preNeuronId);
+      const post = roles.get(synapse.postNeuronId);
+      return (
+        (pre === "sensory" && post === "interneuron") ||
+        (pre === "interneuron" && post === "motor")
+      );
+    }),
+    true
+  );
+  assert.ok(
+    network.synapses.some(
+      (synapse) => roles.get(synapse.preNeuronId) === "sensory" && roles.get(synapse.postNeuronId) === "interneuron"
+    )
+  );
+  assert.ok(
+    network.synapses.some(
+      (synapse) => roles.get(synapse.preNeuronId) === "interneuron" && roles.get(synapse.postNeuronId) === "motor"
+    )
+  );
+  assert.equal(network.neurons.every((neuron) => neuron.inputSlots.length === 2 && neuron.outputSlots.length === 2), true);
+  assert.equal(network.neurons.every((neuron) => neuron.inputSlots.filter(Boolean).length <= 2), true);
+  assert.equal(network.neurons.every((neuron) => neuron.outputSlots.filter(Boolean).length <= 2), true);
+});
+
 test("developmental pairMemory tombstone blocks immediate re-formation after prune", () => {
   const topology = createNearestLayeredTopologyBlueprint({
     inputCount: 1,
@@ -661,6 +740,48 @@ test("developmental pairMemory tombstone blocks immediate re-formation after pru
   // A tombstone for the pruned pair should now block re-formation within cooldown.
   const blocked = tryFormConnections(network.neurons, network.synapses, network.pairMemory, 2, defaultConfig, rng, 8);
   assert.ok(blocked.tombstoneHit > 0, "expected tombstone to block immediate re-formation");
+});
+
+test("passive disconnect marks weak inactive non-stable synapses dormant then pruned", () => {
+  const topology = createNearestLayeredTopologyBlueprint({
+    inputCount: 1,
+    mediumCount: 1,
+    outputCount: 1,
+    synapsesPerInput: 1,
+    synapsesPerMedium: 1,
+    readoutMode: "prewired"
+  });
+  const config = withConfig({
+    ...defaultConfig,
+    minConnectionAge: 1,
+    dormantLimit: 0,
+    useThreshold: 0.2,
+    weakWeightThreshold: 0.05
+  });
+  const network = createLearningNetworkFromBlueprint(topology, config);
+  const roles = new Map(network.neurons.map((neuron) => [neuron.id, neuron.role]));
+  const synapse = network.synapses.find(
+    (item) => roles.get(item.preNeuronId) === "interneuron" && roles.get(item.postNeuronId) === "motor"
+  );
+  assert.ok(synapse);
+
+  synapse.state = "active";
+  synapse.age = config.minConnectionAge + 1;
+  synapse.fastWeight = 0;
+  synapse.stableWeight = 0;
+  synapse.effectiveWeight = 0;
+  synapse.recentUse = 0;
+  synapse.recentContribution = 0;
+
+  const dormant = updateConnectionStates(network.neurons, network.synapses, network.pairMemory, 1, config);
+  assert.equal(dormant.dormant, 1);
+  assert.equal(synapse.state, "dormant");
+
+  const pruned = updateConnectionStates(network.neurons, network.synapses, network.pairMemory, 2, config);
+  assert.equal(pruned.pruned, 1);
+  assert.equal(synapse.state, "pruned");
+  assert.equal(synapse.connected, false);
+  assert.equal(network.pairMemory.length, 1);
 });
 
 // ---------------------------------------------------------------------------

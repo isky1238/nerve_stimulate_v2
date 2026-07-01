@@ -29,7 +29,10 @@
     "audit:rewardonly:checkpoint-probe": "node scripts/longrange_checkpoint_probe.cjs path",
     "audit:topology-family": "npm run build && node scripts/topology_family_probe.cjs",
     "audit:topology-development": "npm run build && node scripts/topology_development_probe.cjs",
-    "audit:asymmetric-valence": "npm run build && node scripts/asymmetric_valence_probe.cjs"
+    "audit:natural-nnk": "npm run build && node scripts/natural_nnk_probe.cjs",
+    "audit:valence-gate-midpoint": "npm run build && node scripts/valence_gate_midpoint_probe.cjs",
+    "audit:asymmetric-valence": "npm run build && node scripts/asymmetric_valence_probe.cjs",
+    "webui": "npm run build && node scripts/webui_server.cjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.7",

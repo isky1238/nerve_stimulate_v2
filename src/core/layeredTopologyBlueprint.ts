@@ -32,6 +32,14 @@ export interface NearestLayeredTopologyOptions extends LayerCounts {
   motorGrowthSlots?: number;
 }
 
+export interface UniformNaturalLayeredTopologyOptions {
+  layerSize?: number;
+  inputCount?: number;
+  mediumCount?: number;
+  outputCount?: number;
+  slotsPerNeuron: number;
+}
+
 export function reduceLayerCounts(counts: LayerCounts): ReducedLayerRatio {
   const inputCount = positiveInteger(counts.inputCount, "inputCount");
   const mediumCount = positiveInteger(counts.mediumCount, "mediumCount");
@@ -148,6 +156,30 @@ export function createNearestLayeredTopologyBlueprint(
   });
 }
 
+export function createUniformNaturalLayeredTopologyBlueprint(
+  options: UniformNaturalLayeredTopologyOptions
+): OfflineLearningTopologyBlueprint {
+  const inputCount = naturalLayerCount(options, "inputCount");
+  const mediumCount = naturalLayerCount(options, "mediumCount");
+  const outputCount = naturalLayerCount(options, "outputCount");
+  const slotsPerNeuron = boundedFanout(options.slotsPerNeuron, "slotsPerNeuron");
+
+  return Object.freeze({
+    sensoryNodes: Object.freeze(createUniformLayerNodes("input", "sensory", inputCount, 0, slotsPerNeuron)),
+    interneuronNodes: Object.freeze(createUniformLayerNodes("medium", "interneuron", mediumCount, 1, slotsPerNeuron, 1)),
+    motorNodes: Object.freeze(createUniformLayerNodes("output", "motor", outputCount, 2, slotsPerNeuron, 1)),
+    synapses: Object.freeze([])
+  });
+}
+
+function naturalLayerCount(options: UniformNaturalLayeredTopologyOptions, key: "inputCount" | "mediumCount" | "outputCount"): number {
+  const value = options[key] ?? options.layerSize;
+  if (value === undefined) {
+    throw new Error(`${key} is required when layerSize is omitted.`);
+  }
+  return positiveInteger(value, key);
+}
+
 function createLayerNodes(
   prefix: string,
   role: TopologyNeuronBlueprint["role"],
@@ -160,6 +192,24 @@ function createLayerNodes(
     role,
     position: { x, y: normalizedLayerY(index, count) },
     branchCount
+  }));
+}
+
+function createUniformLayerNodes(
+  prefix: string,
+  role: TopologyNeuronBlueprint["role"],
+  count: number,
+  x: number,
+  slotsPerNeuron: number,
+  branchCount?: number
+): TopologyNeuronBlueprint[] {
+  return Array.from({ length: count }, (_, index): TopologyNeuronBlueprint => ({
+    id: `${prefix}${index}`,
+    role,
+    position: { x, y: normalizedLayerY(index, count) },
+    branchCount,
+    maxInputSlots: slotsPerNeuron,
+    maxOutputSlots: slotsPerNeuron
   }));
 }
 

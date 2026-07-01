@@ -466,6 +466,204 @@ Scope: `/root/research/nerve_stimulate_v2`
 
 **点 8(aversiveTag 死形参)核实**:`applyRewardOutcomeLearning` 的 `aversiveTag` 形参**不是死的**——`computeAversiveRewardSignal`(avoidanceMarker/combined 加 bonus)、`computeAversiveModulator`(modulatorOnly 增益)都用它,是 E6/E7 长程 8/8 的依赖。死的只是探针内部(strategy="off" 下构造的 aversiveTag 被短路),已清(e07c085)。不删核心形参。
 
+### E10. natural n/n/n/k 形态基线 — 固定 slot + 自然最近连接 + 被动断开(2026-07-01)
+
+**用户目标澄清:**
+- 这不是 `graded_valence_probe` 的 10/25/2 浓度梯度模型,也不是 `topology_family_probe` 的预接线比例族。
+- 理想形态基线是 `n/n/n/k`:n 个感受、n 个中间、n 个效应;所有神经元都有固定 k 个输入槽和 k 个输出槽;二维位置固定;连接自然形成;优先最近连接;弱/未用连接要能被动断开。
+
+**已落地边界:**
+- 新增 `createUniformNaturalLayeredTopologyBlueprint({layerSize:n, slotsPerNeuron:k})`:
+  - 只创建三层节点,不预铺 stem/readout。
+  - 所有节点都声明 `maxInputSlots=k` 且 `maxOutputSlots=k`。注:感受层输入槽/效应层输出槽目前是形态占位,受 `roleCompatible` 限制不会被使用。
+- 新增 `tryFormNearestLayeredConnections`:
+  - 只允许相邻层 `sensory→interneuron`、`interneuron→motor`,避免通用 development 里的 `inter→inter` 抢占 slot。
+  - 按二维距离最近优先形成,仍遵守 slot、threshold、pairMemory/tombstone。
+- 新增 `scripts/natural_nnk_probe.cjs` / `npm run audit:natural-nnk`:
+  - 每 epoch:nearest 自然形成 → rewardOnly 映射训练 → `updateConnectionStates` 被动状态更新。
+  - 报告 SR/noop/conflict/wrong、stem/readout 数、candidate/active/stable/dormant/pruned、累计 formed/pruned。
+- 新增回归测试:固定 slot scaffold、nearest adjacent-layer formation、弱未用非 stable 连接 dormant→pruned。`npm test` 当前 41/41。
+
+**首轮 spot-check(4seed×100ep):**
+- 默认 `n=5,k=2,fastInit=0.12,axonThreshold=1`:
+  - epoch1 已自然形成约 18 条边(stem/readout 各约 9),但 SR=0/noop=1。
+  - 到 epoch50/100:stem=0,readout=0,pruned=50,formed=50。**边不是没长,而是初始权重打不过阈值 → recentUse=0 → 被动断开全部剪掉。**
+- 外生过阈 `FAST_INIT=1.05,n=5,k=2`:
+  - 连接保住并固化(stable≈17.8),但 final SR≈0.10/conflict≈0.80。
+  - 解释:初始激活确实启动了 use-dependent capture,但 k=2 的多输出最近 fanout 在无竞争/抑制下产生结构性 conflict。
+- 单通路对照 `FAST_INIT=1.05,K=1`:
+  - final SR≈0.80/noop≈0.20/conflict=0,stable≈9,pruned≈1。
+  - 解释:nearest 单通路能跑通;残余 noop 来自一条必要 stem 被早期被动剪掉。被动断开存在,但门槛/时间尺度过硬。
+
+**当前解释:**
+1. `n/n/n/k` 形态基线已能把三件事拆开:自然连接能否长出、初始激活能否跨阈、被动断开是否过早剪枝。
+2. 默认失败再次支持 E9 的"阈值锁 + 无初始激活"结论:不是无权重/无连接,而是连接没有被使用,随后被 passive pruning 删除。
+3. `FAST_INIT=1.05` 证明"过阈一次→use-dependent capture 接管"在自然形态基线也成立;但 `k=2` 同时暴露另一个短板:多突触 fanout 缺少竞争/抑制/选择性固化,会把正确与邻近错误 output 一起点亮。
+4. 下一步不应直接把 k>1 判死。要测试:更慢 passive prune、自发放电/背景噪声作为内生初始激活、局部竞争或 winner-take-one readout、以及 connection formation 是否需要按目标层配额而非单纯最近贪心。
+
+### E11. natural m/n/o/k 扩展 — k=5 单点刺激 + 权重快照(2026-07-01)
+
+**实现补齐:**
+- `createUniformNaturalLayeredTopologyBlueprint` 从 `n/n/n/k` 扩展为 `m/n/o/k`;旧 `layerSize` 用法仍兼容。
+- `natural_nnk_probe.cjs` 支持 `M/N/O/K`:
+  - 若设置 `M` 或 `O`,则 `N` 表示 medium 数;否则 `N` 仍是旧共同层大小。
+  - target output 由 input/output 的二维 y 位置最近映射;`2/10/2` 为 output0/output1,`2/10/5` 为 output0/output4。
+- 新增 final 单点刺激/路径权重快照:
+  - `C/N/X/W` per input。
+  - `stemN/fireN/stemEff/actStem/correctD/wrongD`,区分"有 stem 权重"与"实际 firing medium 是否过阈"。
+
+**16seed×100ep,k=5 汇总:**
+- `M=2 N=10 O=2 K=5` 默认 `fastInit=0.12`:
+  - final SR=0,noop=1,solved=0/16。stem=10,readout=0,pruned=20。
+  - 单点:每 input `stemN=5, stemEff≈0.54, fireN=0`。解释:每条 stem 约 0.108,分散到 5 个 medium,单个 medium 不过 axon 阈值 1.0;readout 被剪空。
+- `M=2 N=10 O=5 K=5` 默认 `fastInit=0.12`:
+  - final SR=0,noop=1,solved=0/16。stem=10,readout=0,pruned=50。
+  - 同样是阈值锁;O 更多只让初始 readout 候选更多,随后全剪。
+- `FAST_INIT=1.05, M=2 N=10 O=2 K=5`:
+  - final SR=**1.0**,solved=16/16。stem=10,readout=10,stable=20,pruned=0。
+  - 单点:每 input `fireN=5, correctD≈5.12, wrongD=0`,签名全 `CC`。说明 m/n/m/k 在输出数匹配且最近连接可分区时,只要初始激活跨阈,use-dependent capture 能形成干净主干。
+- `FAST_INIT=1.05, M=2 N=10 O=5 K=5`:
+  - final SR=0,conflict=1,solved=0/16。stem=10,readout=25,stable=35。
+  - 单点:input0 激活 output0|output1|output2,input1 激活 output2|output3|output4;`correctD≈4.9, wrongD≈4.5`。解释:正确和邻近错误 output 都强固化,是结构性多输出 conflict。
+- 补充 `FAST_INIT=1.05, M=2 N=10 O=3 K=5`:
+  - final SR=0,conflict=1。`correctD≈4.76, wrongD≈1.77-2.63`。即 O≠M 时,即使 wrong drive 小于 correct,仍过 motor 阈值并造成 conflict;不是 O=5 特例。
+
+**当前解释:**
+1. k=5 本身不必然失败;`2/10/2/5 + 过阈`能 16/16 解。
+2. 默认失败继续是"每条自然形成 stem 太弱,单个 medium 不过阈,readout 无 use 被剪",不是没有自然成边。
+3. `m/n/o/k` 中 O≠M 暴露了目标层空间/输出竞争缺口:nearest 让一个 input 的 5 个 medium 横跨多个 output 近邻,只要都过阈就多 motor 同时发放。下一步需要局部 winner-take-one、输出侧侧抑制、或 formation 时限制每个 input basin 只固化一个目标输出。
+
+### E12. valence-gate midpoint 集成 — 价值门/纯刺激门/激素代理分离(2026-07-01)
+
+**目的:**
+- 把 E9 的 tagged-impulse/specificFactor 结论接入一个更小的门控输入结构,区别于 `graded_valence_probe` 的群体通道。
+- 输入拆成 4 个门:
+  - `nutrientGate`:营养价值门,不带 tag。
+  - `toxinGate`:毒物价值门,发放 toxin tag;在 `specificFactor` 下释放 global aversive load(激素代理)。
+  - `stimLeft`:左侧纯物质刺激门,默认不带 tag。
+  - `stimRight`:右侧纯物质刺激门,默认不带 tag。
+- 中点刺激 = 四门同时发放;左 motor=toxin 接触,右 motor=nutrient 接触。`TOXIN_REWARD=0,NUTRIENT_REWARD=0,BASELINE_ALPHA=0`,保持 A 负 reward 通道关闭,只测 tag/capture。
+
+**实现:**
+- 新增 `scripts/valence_gate_midpoint_probe.cjs` / `npm run audit:valence-gate-midpoint`。
+- 固定 prewired 小拓扑:`4 sensory / 12 medium / 2 motor`,每个 sensory→nearest 5 medium,medium→nearest motor。
+- 输出 checkpoint 中点行为(left/right/noop/conflict),以及 final frozen 单点/组合刺激快照:
+  - `MIDPOINT`
+  - `TOXIN_SIDE = toxinGate + stimLeft`
+  - `NUTRIENT_SIDE = nutrientGate + stimRight`
+  - 单门:`TOXIN_GATE / NUTR_GATE / STIM_LEFT / STIM_RIGHT`
+- 对照开关:`TAG_PURE_TOXIN_STIM=1` 可让 toxin 侧纯刺激门也携带 tag,测试"激素/价值门是否需要绑定纯刺激通路"。
+
+**8seed×300ep 结果:**
+- `TAGGED_MODE=off`:
+  - 中点全程 conflict。epoch300:leftD≈1.953,rightD≈1.955。
+  - 单点:TOXIN_SIDE→left,NUTRIENT_SIDE→right,两个纯刺激门也各自能驱动对应 motor。说明结构通路正常,但中点双侧同时过阈。
+- `TAGGED_MODE=taggedImpulse`:
+  - epoch200 起中点 8/8 right(nutrient),epoch300:leftD≈0.716,rightD≈1.955。
+  - 单点:TOXIN_SIDE/TOXIN_GATE/STIM_LEFT 都变 noop;NUTRIENT_SIDE/NUTR_GATE/STIM_RIGHT 仍 right。
+  - 解释:toxinGate 的 tag 已足以削左侧 basin 到阈值下,中点转为营养侧。
+- `TAGGED_MODE=specificFactor`:
+  - 与 taggedImpulse 同级:epoch200 起中点 8/8 right,epoch300:leftD≈0.716,rightD≈1.955。
+  - `GLOBAL_INCREMENT=0` 门控关闭后退回 off:中点 conflict,leftD≈1.953,rightD≈1.955。证明 specificFactor 不是死开关,确实依赖激素代理。
+- `TAGGED_MODE=specificFactor TAG_PURE_TOXIN_STIM=1`:
+  - 中点同样 8/8 right,但左侧削得更深:leftD≈0.468。
+  - 解释:把 toxin 侧纯刺激也纳入 tag 会加强去固化,但不是中点转向营养的必要条件。
+
+**当前解释:**
+1. 分离"价值门"和"纯刺激门"后,中点行为测试能复现 E9 的关键机制:off=双侧 conflict;tagged/specificFactor=削 toxin-side,left drive 跌破阈值,中点选择 nutrient side。
+2. 这说明 tagged impulse 不要求把所有纯刺激都编码成 toxin/nutrient 群体通道;一个 toxin 价值门 + 激素代理已能调制同侧 basin。
+3. 风险仍在:当前是 prewired 小拓扑,不是自然 `m/n/o/k` 发育;而且 `stimLeft` 在 tagged 模式下也被削到 noop,说明左侧纯刺激和 toxinGate 在同一 basin 内共享读出,还没有真正解决"纯刺激保持中性、价值门只调制语义"的绑定问题。下一步应把该门控结构接入自然 formation,再观察是否需要局部绑定/侧抑制。
+
+**语义修正(同日复核):**
+- 用户指出 `stimLeft/stimRight` 不应表示左右侧,而应是纯粹"接收到物体/物质刺激"。已把脚本改为:
+  - `objectStimA/objectStimB`:纯物体刺激门,无左右语义、无 valence、默认不带 tag。
+  - `toxinGate`:毒物价值门,释放 toxin tag;`specificFactor` 下释放 global aversive load(激素代理)。
+  - `nutrientGate`:营养门,不释放 tag;营养物体 = `nutrientGate + objectStimA + objectStimB`。
+  - 输出也改为 `toxinMotor/nutrientMotor`,不再用 `left/right` 描述语义选择。
+- `TAG_OBJECT_STIM_WITH_TOXIN=1` 是误伤压力测试:当毒物出现时,连纯物体刺激门也被 tag 标记。旧 `TAG_PURE_TOXIN_STIM=1` 仅作为兼容别名保留。
+
+**语义修正后 8seed×300ep 复跑:**
+- `TAGGED_MODE=off`:
+  - 中点全程 conflict;epoch300 `toxinD≈1.953,nutrD≈1.955`。
+  - `PURE_OBJECT` 本身也 conflict(`toxinD≈1.30,nutrD≈1.30`),说明纯物体刺激没有价值方向,只是结构上同时触发两个 basin。
+- `TAGGED_MODE=specificFactor`:
+  - epoch200 起中点 8/8 选择 nutrient;epoch300 `toxinD≈0.716,nutrD≈1.955`。
+  - `GLOBAL_INCREMENT=0` 后退回 off 的 conflict,证明激素代理仍是必要门控。
+  - 单点显示 `TOXIN_GATE→noop`,但 `NUTR_GATE→nutrient`;`PURE_OBJECT→nutrient` 是因为 toxin basin 被削到阈值下,不是纯刺激自己携带营养标记。
+- `TAGGED_MODE=specificFactor TAG_OBJECT_STIM_WITH_TOXIN=1`:
+  - epoch200 短暂 nutrient,epoch300 变 noop;`toxinD≈0.468,nutrD≈0.964`,两侧都低于阈值。
+  - 这正是"误伤"风险:把共享纯物体刺激也纳入毒物 tag 会长期削弱 shared basin,最后连营养侧也无法可靠发放。
+
+**修正后解释:**
+1. `objectStimA/objectStimB` 现在确认为纯"有物体刺激"门,不分左右;毒物差异来自 `toxinGate` 的 tag/激素代理,营养侧保持无 tag。
+2. 不给纯刺激门打 tag 时,`toxinGate` 已足以把 toxin basin 削到阈值下,中点自判断转向 nutrient。
+3. 给纯刺激门也打 tag 会过度去固化,复现用户预判的误伤问题。下一步如果接入自然 `m/n/o/k` 发育,应优先测试"tag 只标价值门"与"tag 扩散到共享纯刺激"的长期差异。
+
+### E13. natural m/n/o/k × L 等比基数放大(2026-07-01)
+
+**实现补齐:**
+- `natural_nnk_probe.cjs` 新增 `L`/`SCALE` 倍率参数。
+- 语义:`base m/n/o/k × L => actual (mL)/(nL)/(oL)/k`;只放大神经元层数,不改变每节点 slot 数 `k`。
+
+**16seed×100ep,L=2,k=5:**
+- `M=2 N=10 O=2 K=5 L=2` → actual `4/20/4/5`,默认 `fastInit=0.12`:
+  - final SR=0,noop=1,solved=0/16。stem=20,readout=0,pruned≈80.9。
+  - 单点:每 input `stemN=5,fireN=0,stemEff≈0.49`。结论仍是阈值锁;等比放大节点数不增加单 input 的 per-medium drive。
+- `M=2 N=10 O=5 K=5 L=2` → actual `4/20/10/5`,默认 `fastInit=0.12`:
+  - final SR=0,noop=1,solved=0/16。stem=20,readout=0,pruned≈200.9。
+  - 同上,只增加待剪 readout 候选数,不解决初始激活。
+- `FAST_INIT=1.05, M=2 N=10 O=2 K=5 L=2` → actual `4/20/4/5`:
+  - final SR≈**0.359**,conflict≈**0.641**,solved=0/16。stem=20,readout=20,stable=40。
+  - FULL 4seed:典型签名 `XCXX/XXCX/XCXC`;邻近 wrong drive≈0.97-1.32,刚好过 motor 阈值,形成 `output0|output1`、`output2|output3` 邻近冲突。
+  - 与 L=1 的 `2/10/2/5 + FAST_INIT=1.05 => SR=1.0` 对比,说明等比放大后 output 间距变密,nearest readout 的相邻输出泄漏变成冲突。
+- `FAST_INIT=1.05, M=2 N=10 O=5 K=5 L=2` → actual `4/20/10/5`:
+  - final SR=0,conflict=1.0。stem=20,readout=50,stable=70,pruned≈4。
+  - 单点:correctD≈4.95,wrongD≈3.79-4.82,邻近错误输出强过阈。
+
+**当前解释:**
+1. 单纯等比放大神经元基数不能解决默认阈值锁,因为每个 input 仍只连 k=5 个 medium,单条 stem 初始/衰减后的 per-medium drive 不变甚至略低。
+2. 在外生过阈条件下,L=2 反而暴露输出空间分辨率问题:输出层更密,同一个 input basin 的 5 个 medium 会跨到相邻 output,wrong drive 只要略过 1.0 就变 conflict。
+3. 后续如果继续 scale,不能只做 `m/n/o × L`。要同步研究:输出侧侧抑制/winner-take-one、每 input basin 的 readout 配额、或者随 L 调整 `k/threshold/距离核`,否则大基数会把"邻近输出泄漏"放大成稳定冲突。
+
+**epoch300 曲线 + 单点/权重复跑(16seed,checkpoint=1/20/50/100/150/200/250/300):**
+- `4/20/4/5` 默认 `fastInit=0.12`:
+  - SR 全程 0,noop 全程 1。epoch20 readout 已清空;epoch250 后累计 prune 再增一轮。final:stem=20,readout=0,pruned≈160.9。
+  - 单点:每 input `stemN=5,fireN=0,stemEff≈0.33`;readout weight totals 全 output=0。结论:长跑只让 stem 继续衰减/候选继续被剪,不会自发解锁。
+- `4/20/10/5` 默认:
+  - 同样 SR=0/noop=1;final readout=0,pruned≈400.9。O 更多只放大被剪 readout 数。
+- `FAST_INIT=1.05,4/20/4/5`:
+  - 曲线:epoch1 SR=0/conflict=1 → epoch20 SR=0.344 → epoch50 SR=0.422 峰值 → epoch100 SR=0.359 → epoch150 0.172 → epoch200 0.109 → epoch250 0.031 → epoch300 **SR=0/conflict=1**。
+  - final 单点:每 input `fireN=5,correctD≈5.44-5.52,wrongD≈1.24-1.31`,所有 input 都 conflict。
+  - FULL 4seed drive map:input0 总是 `output0≈5.1-5.7 + output1≈1.2-1.5`,input1 是 `output1≈5.3-5.8 + output0≈1.25-1.40`,input2/3 同理在 `output2/output3` 邻近冲突。readout totals 每 output live=5,stable≈5.3-5.5。
+  - 解释:早期有一段 partial window,但 Hebbian capture 继续把邻近 wrong output 固化到阈值以上,最终所有 basin 变双输出。
+- `FAST_INIT=1.05,4/20/10/5`:
+  - 曲线从 epoch1 到 epoch300 都是 conflict=1。final:readout=50,stable=70,pruned≈4。
+  - 单点:correctD≈5.17-5.26,wrongD≈3.76-4.95。FULL drive map 显示 input0 可同时点亮 output0/1/2/3,input1 点亮 output0..5,input2 点亮 output4..9,input3 点亮 output6..9。
+  - 解释:输出层更密时,一个 input basin 的 5 个 medium 横跨多个 motor;所有邻近输出都会被稳定固化,没有竞争机制时天然走向多输出 conflict。
+
+### E14. 图形化 WebUI 观察工具(2026-07-01)
+
+**目的:**
+- 做一个薄 UI/IO 层,用于观察世界模型、网格拓扑、连接形成/剪枝、单点刺激路径、motor drive 和 readout 权重分布。
+- 不把机制计算搬到浏览器;服务端复用 `dist/src/core` 的 topology/development/mechanism,浏览器只绘图和展示。
+
+**实现:**
+- 新增 `scripts/webui_server.cjs` / `npm run webui`。
+- 新增 `webui/index.html`,`webui/app.js`,`webui/styles.css`。
+- 两个视图:
+  - `natural`:自然 `m/n/o/k × L` 网格,展示 checkpoint 曲线、拓扑图、连接状态(candidate/active/stable/dormant/pruned)、单点刺激 `stemN/fireN/correctD/wrongD`、输出权重 totals。
+  - `valence`:1/2/1 中点世界,展示 `toxinGate/objectStimA/objectStimB/nutrientGate`、激素代理开关、刺激组合快照、`toxinD/nutrD`。
+- 按手绘图补充 `gridWorld` 视图:
+  - 真实世界是一维线:agent 在中点,营养/毒物/物体可出现在左/右/中点。
+  - 网络是二维坐标:感受层包含 `nutrientSense/object*/toxinSense`,medium 是 rows×cols 网格,motor 是 `leftMotor/rightMotor`。
+  - 物体位置只激活最近的 `object*` 感受器;营养/毒物通过 value sense 进入。这样避免把左右直接写死到 nutrient/toxin。
+  - checkpoint 曲线显示 `correct/left/right/conflict/noop`;运行视图显示世界线、二维连接迁移、case 快照、left/right drive 和 motor 权重 totals。
+
+**验证:**
+- `node --check scripts/webui_server.cjs && node --check webui/app.js` 通过。
+- `/api/simulate` 已用 natural/valence/gridWorld 三种模型做 HTTP spot-check,均返回 graph/path 或 graph/cases;gridWorld 1000epoch checkpoint 返回 `1,5,10,20,50,100,150,200,250,300,400,500,750,1000`。
+- `npm test` 42/42 通过。
+
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
 - [ ] 扩 pattern 数 / 降 lr / 加长 episode,把 fresh 饱和点推后
       → 让 continued-learning sep 能取正值,而非恒 0

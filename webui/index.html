@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DG-SNN Formation Lab</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>DG-SNN Formation Lab</h1>
+        </div>
+        <button id="runButton" type="button">Run</button>
+      </header>
+
+      <section class="workspace">
+        <aside class="controls" aria-label="simulation controls">
+          <label>
+            模型
+            <select id="mode">
+              <option value="natural">自然 m/n/o/k 网格</option>
+              <option value="gridWorld">二维世界网格</option>
+              <option value="valence">1/2/1 中点世界</option>
+            </select>
+          </label>
+
+          <div id="naturalControls" class="control-group">
+            <h2>自然网格</h2>
+            <label>m 感受器 <input id="inputCount" type="number" min="1" max="100" value="2"></label>
+            <label>n 中间层 <input id="mediumCount" type="number" min="1" max="500" value="10"></label>
+            <label>o 效应器 <input id="outputCount" type="number" min="1" max="100" value="2"></label>
+            <label>k 槽/突触 <input id="slotsPerNeuron" type="number" min="1" max="50" value="5"></label>
+            <label>L 倍率 <input id="scale" type="number" min="1" max="20" value="1"></label>
+            <label>fastInit <input id="fastInit" type="number" step="0.01" min="0" max="2" value="0.12"></label>
+          </div>
+
+          <div id="gridWorldControls" class="control-group hidden">
+            <h2>二维世界</h2>
+            <label>object sensors <input id="objectSensorCount" type="number" min="3" max="100" value="5"></label>
+            <label>medium rows <input id="mediumRows" type="number" min="1" max="50" value="3"></label>
+            <label>medium cols <input id="mediumCols" type="number" min="1" max="50" value="5"></label>
+            <label>k 槽/突触 <input id="gridSlotsPerNeuron" type="number" min="1" max="50" value="5"></label>
+            <label>fastInit <input id="gridFastInit" type="number" step="0.01" min="0" max="2" value="0.12"></label>
+            <label>
+              tag 模式
+              <select id="gridTaggedMode">
+                <option value="specificFactor">specificFactor</option>
+                <option value="taggedImpulse">taggedImpulse</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+            <label>激素增量 <input id="gridGlobalIncrement" type="number" step="0.1" min="-10" max="10" value="1"></label>
+            <label class="checkbox-row"><input id="gridTagObjectStimWithToxin" type="checkbox"> 纯物体刺激也随毒物 tag</label>
+          </div>
+
+          <div id="valenceControls" class="control-group hidden">
+            <h2>中点世界</h2>
+            <label>
+              tag 模式
+              <select id="taggedMode">
+                <option value="specificFactor">specificFactor</option>
+                <option value="taggedImpulse">taggedImpulse</option>
+                <option value="off">off</option>
+              </select>
+            </label>
+            <label>中间层 <input id="valenceMediumCount" type="number" min="1" max="200" value="12"></label>
+            <label>stem fanout <input id="stemFanout" type="number" min="1" max="50" value="5"></label>
+            <label>readoutFast <input id="readoutFast" type="number" step="0.01" min="0" max="5" value="0.35"></label>
+            <label>激素增量 <input id="globalIncrement" type="number" step="0.1" min="-10" max="10" value="1"></label>
+            <label class="checkbox-row"><input id="tagObjectStimWithToxin" type="checkbox"> 纯物体刺激也随毒物 tag</label>
+          </div>
+
+          <div class="control-group">
+            <h2>运行</h2>
+            <label>epochs <input id="epochs" type="number" min="1" max="1000" value="100"></label>
+            <label>seeds <input id="seedCount" type="number" min="1" max="16" value="1"></label>
+            <label id="trialsPerEpochRow" class="hidden">trials/epoch <input id="trialsPerEpoch" type="number" min="1" max="200" value="10"></label>
+            <label>axon 阈值 <input id="axonThreshold" type="number" step="0.05" min="0" max="5" value="1"></label>
+            <label>branch 阈值 <input id="branchThreshold" type="number" step="0.05" min="0" max="5" value="0.1"></label>
+            <label id="candidateMaxAgeRow">candidate age <input id="candidateMaxAge" type="number" min="1" max="1000" value="20"></label>
+            <label id="dormantLimitRow">dormant limit <input id="dormantLimit" type="number" min="1" max="5000" value="50"></label>
+          </div>
+        </aside>
+
+        <section class="stage">
+          <div class="canvas-band">
+            <canvas id="worldCanvas" width="940" height="170" aria-label="world model canvas"></canvas>
+          </div>
+          <div class="canvas-band network-band">
+            <canvas id="networkCanvas" width="940" height="520" aria-label="network graph canvas"></canvas>
+          </div>
+          <div class="timeline">
+            <label>
+              checkpoint
+              <input id="checkpointSlider" type="range" min="0" max="0" value="0">
+            </label>
+            <span id="checkpointLabel">epoch -</span>
+          </div>
+        </section>
+
+        <aside class="inspector" aria-label="simulation inspector">
+          <section>
+            <h2>曲线</h2>
+            <canvas id="curveCanvas" width="360" height="170"></canvas>
+          </section>
+
+          <section>
+            <h2>摘要</h2>
+            <div id="summary" class="summary-grid"></div>
+          </section>
+
+          <section id="naturalInspector">
+            <h2>单点刺激</h2>
+            <label>
+              input
+              <select id="inputSelector"></select>
+            </label>
+            <div id="pathDetails" class="kv-list"></div>
+            <h2>输出权重</h2>
+            <div id="weightTable" class="table-wrap"></div>
+          </section>
+
+          <section id="valenceInspector" class="hidden">
+            <h2>刺激组合</h2>
+            <label>
+              case
+              <select id="caseSelector"></select>
+            </label>
+            <div id="caseDetails" class="kv-list"></div>
+          </section>
+
+          <section id="gridWorldInspector" class="hidden">
+            <h2>世界刺激</h2>
+            <label>
+              case
+              <select id="gridCaseSelector"></select>
+            </label>
+            <div id="gridCaseDetails" class="kv-list"></div>
+            <h2>motor 权重</h2>
+            <div id="gridWeightTable" class="table-wrap"></div>
+          </section>
+
+          <section>
+            <h2>连接样本</h2>
+            <div id="edgeTable" class="table-wrap"></div>
+          </section>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

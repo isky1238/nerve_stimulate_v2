@@ -145,6 +145,103 @@ export function tryFormConnections(
   return metrics;
 }
 
+export function tryFormNearestLayeredConnections(
+  neurons: Neuron[],
+  synapses: Synapse[],
+  pairMemory: PairMemory[],
+  tick: number,
+  config: ModelConfig,
+  maxNewConnections = 8
+): DevelopmentMetrics {
+  const metrics = createDevelopmentMetrics();
+  const candidates = [];
+
+  for (const pre of neurons) {
+    if (!hasFreeSlot(pre.outputSlots)) {
+      continue;
+    }
+
+    for (const post of neurons) {
+      if (!nearestLayerCompatible(pre, post) || !hasFreeSlot(post.inputSlots)) {
+        continue;
+      }
+
+      for (const branch of post.branches) {
+        if (hasLiveConnection(synapses, pre.id, post.id, branch.id)) {
+          continue;
+        }
+
+        const memory = findPairMemory(pairMemory, pre.id, post.id, branch.id);
+        if (memory && memory.cooldownUntil > tick) {
+          metrics.tombstoneHit += 1;
+          continue;
+        }
+
+        const score = connectionScore(pre, post, config);
+        if (score < config.connectionThreshold) {
+          continue;
+        }
+
+        candidates.push({
+          pre,
+          post,
+          branch,
+          distance: connectionDistance(pre, post)
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => {
+    const distance = a.distance - b.distance;
+    if (distance !== 0) return distance;
+    const pre = a.pre.id.localeCompare(b.pre.id);
+    if (pre !== 0) return pre;
+    const post = a.post.id.localeCompare(b.post.id);
+    if (post !== 0) return post;
+    return a.branch.id.localeCompare(b.branch.id);
+  });
+
+  let remaining = maxNewConnections;
+  for (const candidate of candidates) {
+    if (remaining <= 0) {
+      break;
+    }
+
+    if (
+      !hasFreeSlot(candidate.pre.outputSlots) ||
+      !hasFreeSlot(candidate.post.inputSlots) ||
+      hasLiveConnection(synapses, candidate.pre.id, candidate.post.id, candidate.branch.id)
+    ) {
+      continue;
+    }
+
+    const synapse = createSynapse(
+      {
+        id: `syn-${synapses.length + 1}`,
+        preNeuronId: candidate.pre.id,
+        postNeuronId: candidate.post.id,
+        postBranchId: candidate.branch.id,
+        effectSign: 1,
+        state: "candidate",
+        fastWeight: config.fastWeightInit,
+        stableWeight: 0
+      },
+      config
+    );
+
+    if (!attachSynapseToSlots(candidate.pre, candidate.post, synapse)) {
+      continue;
+    }
+
+    synapses.push(synapse);
+    metrics.formed += 1;
+    remaining -= 1;
+  }
+
+  return metrics;
+}
+
 export function updateConnectionStates(
   neurons: Neuron[],
   synapses: Synapse[],
@@ -295,9 +392,28 @@ function hasLiveConnection(
   );
 }
 
-function connectionScore(pre: Neuron, post: Neuron, config: ModelConfig): number {
+function nearestLayerCompatible(pre: Neuron, post: Neuron): boolean {
+  if (pre.id === post.id) {
+    return false;
+  }
+
+  if (pre.role === "sensory") {
+    return post.role === "interneuron";
+  }
+
+  if (pre.role === "interneuron") {
+    return post.role === "motor";
+  }
+
+  return false;
+}
+
+function connectionDistance(pre: Neuron, post: Neuron): number {
   const dx = pre.position.x - post.position.x;
   const dy = pre.position.y - post.position.y;
-  const distance = Math.sqrt(dx * dx + dy * dy);
-  return Math.exp(-distance / config.connectionDistanceLambda);
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function connectionScore(pre: Neuron, post: Neuron, config: ModelConfig): number {
+  return Math.exp(-connectionDistance(pre, post) / config.connectionDistanceLambda);
 }
