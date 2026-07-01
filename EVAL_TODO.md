@@ -456,6 +456,14 @@ Scope: `/root/research/nerve_stimulate_v2`
   - specificFactor:与 taggedImpulse 相同(逼近 toxin 时 load 足够开门)。
 - **发现(回答 1.2)**:梯度下机制**不是"为防御而防御"**——真削了 toxin(2.72→0.51)、真避毒(8/8 toxin→0)。但**approach 表达不出来**:中心 x=5 处 kN=round(5/6)=1,只 1 个 nutrient inter 发放,贡献 ~0.35 ≪ motor 阈值 1.0 → 营养 motor 不发 → 卡中心。二元探针的 8/8 趋营养依赖中心全通道强驱动(k=n);梯度暴露了**单靠 avoidance 表达不出 approach**——缺(a)正营养信用(reward=0、A 消 → nutrient readout 停在初始 0.35 不长)和(b)中心感知够强。与 1.3 一致(负 tag 给避毒以意义;正向 approach 需自己的信号),也是 deferred 的 candidate/credit 鸡生蛋。
 
+**群体聚焦假说验证 + 放大实验(f008e19,用户:ANALYZE 单点 / 放大模型 / 不均衡放大感受器)**:
+- 单点刺激扫描(每位置 x 只激活该距离的某侧通道,测放电 inter 数 / 各自 eff / 实际驱动 driveSum vs 总 nutrEff):
+  - N=5 baseline 中心 x=5:kN=1 → 5 inter 放电,有效 3 个各 0.24 → drive **0.725 < 阈值 1.0** → stuck。总 nutrEff 1.17 散布在距离递减的 9 个 inter(0.24/0.09/0.06);motor 只在 x≥9(已到 nutrient)放电。**鸡生蛋是阈值锁**:权重存在但决策位置不够阈值,要凑够得先靠近目标。nutrEff 是衰减的初始值(无 capture:reward=0、A 消 → 无正信用沉淀)。
+- 放大矩阵(300ep×8seed,taggedImpulse):
+  - **scale10(N_toxin=N_nutrient=10):8/8 APPROACH** ✅。kN(中心)=2 → drive 1.7 → motor 发 → 右移 → 营养通路激活 → **use-dependent capture 自强化(nutrEff 1.17→3.57,无奖励,capture 是使用门控非奖励门控)**。toxinEff 被 tag 削到 0.29。**确认阈值假说:过阈值一次,Hebbian capture 接管,不需奖励信号**。Caveat:nutrient motor 在每个 x 都发(x=0 也 1.135>1),故 approach 是 valence 区分但非梯度敏感(二元 motor 无法表达梯度强度)。
+  - asym5_10 / asym5_15(营养放大):8/8 **TOXIN**(反噬)。不等通道数破坏拓扑/连接平衡 → toxin readout 固化(2.64/3.81,tag 削不过 capture)→ nutrient 塌到 ~0。**放大必须对称**。
+- **结论**:approach 缺口的根因是**阈值锁 + 无正信用**,非"无权重"。对称放大过阈值即用 use-dependent 自强化打破鸡生蛋——这把 deferred 自发放电的动机从"破 candidate 鸡生蛋"细化到"提供初始激活让 use-dependent capture 启动正向通路"(放大模型=外生激活的一种;自发放电=内生激活的等价目标)。
+
 **点 8(aversiveTag 死形参)核实**:`applyRewardOutcomeLearning` 的 `aversiveTag` 形参**不是死的**——`computeAversiveRewardSignal`(avoidanceMarker/combined 加 bonus)、`computeAversiveModulator`(modulatorOnly 增益)都用它,是 E6/E7 长程 8/8 的依赖。死的只是探针内部(strategy="off" 下构造的 aversiveTag 被短路),已清(e07c085)。不删核心形参。
 
 ### D. 任务复杂度扩展 — 让 vacuous gate 变非空真(可与 C 并行)
