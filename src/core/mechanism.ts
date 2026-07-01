@@ -68,6 +68,14 @@ export function propagateAndIntegrateRole(
       integrateNeuron(neuron, config);
     }
   }
+
+  // Global aversive load (variant 1 / specificFactor hormone gate) decays each
+  // propagation tick. Its increment is driven by the toxin sensory tag origin
+  // (the probe's markToxinTag adds config.globalAversiveLoadIncrement when toxin
+  // sensory fire); decay here gives it a lingering window after the impulse.
+  if (config.taggedDepotentiationMode === "specificFactor") {
+    network.globalAversiveLoad *= config.globalAversiveLoadDecay;
+  }
 }
 
 export function updateNetworkEligibility(network: LearningNetwork, config: ModelConfig): void {

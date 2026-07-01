@@ -934,6 +934,69 @@ test("valence probe stem variant forms candidate readouts (developmental wiring 
   assert.equal(hasReadout, true);
 });
 
+test("variant 1 specificFactor AND-gate: tag alone does not flip without global load", () => {
+  // Variant 1 requires BOTH the global aversive load (specific-factor hormone)
+  // AND a tagged impulse hitting the readout. With the gate closed (load below
+  // threshold), a tagged toxin-contact trial must NOT erode the toxin readout —
+  // distinguishing variant 1 from variant 2 (where tag alone flips).
+  const config = withConfig({
+    ...createValenceTestConfig(),
+    taggedDepotentiationMode: "specificFactor",
+    globalAversiveLoadIncrement: 0, // gate never opens
+    globalSensitizationThreshold: 0.5
+  });
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds, leftMotorId, toxinImpulseIds } = ctx;
+
+  const beforeLeft = motorReadoutEff(network, leftMotorId);
+  const rng = new SeededRandom(11);
+  for (let i = 0; i < 40; i += 1) {
+    resetNetworkRuntime(network);
+    setSensoryOutputs(network, centerIds);
+    markToxinTag(network, toxinImpulseIds);
+    // Gate closed: no globalAversiveLoadIncrement (config increment=0).
+    propagateAndIntegrateRole(network, "interneuron", config);
+    clearSensoryOutputs(network);
+    propagateAndIntegrateRole(network, "motor", config);
+    for (const nr of network.neurons) {
+      if (nr.role === "motor") {
+        nr.outputSignal = nr.id === leftMotorId ? 1 : 0;
+        nr.spike = nr.id === leftMotorId;
+      }
+    }
+    updateNetworkEligibility(network, config);
+    applyRewardOutcomeLearning(network, 0, config, undefined);
+    applyMaintenanceDecayAndCapture(network, config);
+  }
+  void rng;
+  const afterLeft = motorReadoutEff(network, leftMotorId);
+  // Gate closed => no flip => toxin readout NOT eroded (only uniform decay,
+  // which over 40 steps with fastDecay 0.9995 leaves it near its pre-trial value).
+  assert.ok(afterLeft >= beforeLeft - 0.2, `gate closed: toxin readout must not be eroded by tag flip: ${beforeLeft} -> ${afterLeft}`);
+});
+
+test("variant 1 specificFactor: global aversive load decays per propagation tick", () => {
+  // The hormone gate lingers via per-tick decay (the hormone window). Verify
+  // propagateAndIntegrateRole decays globalAversiveLoad in specificFactor mode.
+  const config = withConfig({
+    ...createValenceTestConfig(),
+    taggedDepotentiationMode: "specificFactor",
+    globalAversiveLoadDecay: 0.9
+  });
+  const ctx = buildValenceNetwork("prewired", config);
+  const { network, centerIds, toxinImpulseIds } = ctx;
+
+  resetNetworkRuntime(network);
+  setSensoryOutputs(network, centerIds);
+  markToxinTag(network, toxinImpulseIds);
+  network.globalAversiveLoad = 1.0;
+  propagateAndIntegrateRole(network, "interneuron", config);
+  clearSensoryOutputs(network);
+  propagateAndIntegrateRole(network, "motor", config);
+  // Two propagation ticks => load decays twice: 1.0 * 0.9 * 0.9 = 0.81.
+  assert.ok(Math.abs(network.globalAversiveLoad - 0.81) < 1e-9, `expected decayed load ~0.81, got ${network.globalAversiveLoad}`);
+});
+
 test("tagged impulse propagates along toxin sensory path to motor-side readout", () => {
   // Step 1 infrastructure: a toxin sensory neuron emits a tagged impulse; the
   // tag rides the active conduction path (sensory -> inter -> motor) without

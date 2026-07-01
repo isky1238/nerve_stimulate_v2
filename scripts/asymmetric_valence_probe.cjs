@@ -138,6 +138,13 @@ const BASELINE_ALPHA = numberEnv("BASELINE_ALPHA", 0);
 //   taggedImpulse  — variant 2: tag reaching a readout flips capture (self-marking).
 //   specificFactor — variant 1: AND gate of global aversive load + tag reaching readout.
 const TAGGED_MODE = process.env.TAGGED_MODE || "taggedImpulse";
+// Variant 1 controls (specificFactor). GLOBAL_INCREMENT=0 closes the hormone
+// gate (load never rises above threshold => no flip => control: should regress
+// to conflict/stuck, matching TAGGED_MODE=off). GLOBAL_DECAY tunes the linger
+// window (smaller = longer hormone window).
+const GLOBAL_INCREMENT = signedNumberEnv("GLOBAL_INCREMENT", 1.0);
+const GLOBAL_DECAY = numberEnv("GLOBAL_DECAY", 0.9);
+const GLOBAL_THRESHOLD = signedNumberEnv("GLOBAL_THRESHOLD", 0.5);
 
 function createProbeConfig() {
   return withConfig({
@@ -163,6 +170,9 @@ function createProbeConfig() {
     aversiveBadOutcomeThreshold: 0,
     taggedDepotentiationMode: TAGGED_MODE,
     taggedCaptureGain: 1.0,
+    globalAversiveLoadIncrement: GLOBAL_INCREMENT,
+    globalAversiveLoadDecay: GLOBAL_DECAY,
+    globalSensitizationThreshold: GLOBAL_THRESHOLD,
     rewardAdvantageBaselineAlpha: BASELINE_ALPHA
   });
 }
@@ -241,6 +251,12 @@ function runTrial(network, ctx, config, rng, baselineState, explore) {
   resetNetworkRuntime(network);
   setSensoryOutputs(network, ctx.centerIds);
   markToxinTag(network, ctx.toxinImpulseIds);
+  // Variant 1 (specificFactor): toxin detection releases the global aversive
+  // load (hormone). It accumulates while toxin sensory fire and decays each
+  // tick (propagateAndIntegrateRole), giving a lingering sensitization window.
+  if (config.taggedDepotentiationMode === "specificFactor") {
+    network.globalAversiveLoad += config.globalAversiveLoadIncrement;
+  }
   propagateAndIntegrateRole(network, "interneuron", config);
   clearSensoryOutputs(network);
   propagateAndIntegrateRole(network, "motor", config);
